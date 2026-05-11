@@ -1,0 +1,46 @@
+# Python
+**/__pycache__/
+*.pyc
+*.pyo
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+
+# Virtualenvs
+**/venv/
+**/.venv/
+**/env/
+
+# Env files (real ones — examples are tracked)
+**/.env
+!**/.env.example
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+_archive_v2/frontend/node_modules/
+
+# Local tool configs (may contain tokens)
+.codex/
+
+# Skein local data (daemon DB + per-project state during dev)
+.skein/
+*.skein.db
+*.skein.db-journal
+*.skein.db-wal
+*.skein.db-shm
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~

@@ -1,0 +1,35 @@
+---
+description: Skein context bus integration — call recall/remember automatically
+alwaysApply: true
+---
+
+# Skein integration
+
+This project uses **Skein** for cross-LLM context sharing. The local daemon
+exposes an MCP server you have access to.
+
+## Use these tools proactively
+
+- **At the start of any non-trivial task**, call the `recall` MCP tool with a
+  query that summarises the task. Treat the returned fragments as authoritative
+  context that other agents have left for you.
+- **After each significant decision**, call `remember` (or `note_decision`) to
+  persist it. Use `type="decision"` for choices, `"observation"` for code-level
+  changes, `"requirement"` for hard rules, `"preference"` for style.
+- **Before editing files in a shared area**, call `claim_lease` with the file
+  glob, so other agents won't clobber your work.
+
+## Scope
+
+Use scope handle `project:company-brain` for this project.
+
+## Fallback
+
+If the MCP server is unavailable, run shell commands instead:
+```
+/usr/local/bin/skein recall "<query>"
+/usr/local/bin/skein remember "<content>" --type decision
+```
+
+(This file is auto-managed by `skein hooks install`. Delete it or run
+`skein hooks uninstall` to remove.)

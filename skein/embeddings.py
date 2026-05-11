@@ -1,0 +1,384 @@
+"""Embedding provider abstraction.
+
+Supported providers:
+  "hash"   – deterministic fake embedding from SHA-256 (offline; good for tests).
+             Quality is zero — do NOT use for production recall.
+  "gemini" – Google Gemini gemini-embedding-001 (768-dim, free tier).
+             Requires GEMINI_API_KEY env var or google-genai package.
+  "openai" – OpenAI text-embedding-3-small (1536-dim).
+             Requires OPENAI_API_KEY env var and openai package.
+
+The dimension parameter is validated against the provider's output size.
+
+All providers expose:
+    embed(texts: list[str]) -> list[list[float]]
+
+Network-backed providers (Gemini, OpenAI) MUST treat each call as best-effort:
+  - Bounded per-request timeout.
+  - Limited retry/backoff on rate-limit / 5xx / network errors.
+  - After ``FAIL_THRESHOLD`` consecutive failures, return zero vectors for the
+    rest of the batch (keyword-only fallback) instead of blocking. Ingest then
+    continues — the chunk still lands in the DB and FTS5 still indexes it for
+    keyword search.
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+import math
+import os
+import time
+from concurrent.futures import TimeoutError as FutureTimeout
+from typing import List, Optional
+
+import numpy as np
+
+logger = logging.getLogger("skein.embeddings")
+
+
+# ---------------------------------------------------------------------------
+# Base
+# ---------------------------------------------------------------------------
+
+class EmbeddingProvider:
+    """Abstract base class."""
+
+    dimension: int = 768
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        raise NotImplementedError
+
+    def embed_one(self, text: str) -> List[float]:
+        return self.embed([text])[0]
+
+
+# ---------------------------------------------------------------------------
+# Hash provider (offline, deterministic)
+# ---------------------------------------------------------------------------
+
+class HashEmbeddingProvider(EmbeddingProvider):
+    """Deterministic pseudo-embedding from SHA-256.
+
+    Not semantically meaningful — exists so the system runs offline
+    and tests are reproducible without an API key.
+    """
+
+    dimension: int = 768
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        results = []
+        for text in texts:
+            vec = self._hash_to_vec(text)
+            results.append(vec)
+        return results
+
+    @staticmethod
+    def _hash_to_vec(text: str, dim: int = 768) -> List[float]:
+        # Build a deterministic float vector from repeated SHA-256 hashing.
+        seed = text.encode("utf-8")
+        floats: List[float] = []
+        counter = 0
+        while len(floats) < dim:
+            digest = hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()
+            # Each byte gives one float in [-1, 1]
+            for b in digest:
+                floats.append((b / 127.5) - 1.0)
+                if len(floats) == dim:
+                    break
+            counter += 1
+        # Normalize to unit vector
+        arr = np.array(floats, dtype=np.float32)
+        norm = np.linalg.norm(arr)
+        if norm > 0:
+            arr = arr / norm
+        return arr.tolist()
+
+
+# ---------------------------------------------------------------------------
+# Gemini provider
+# ---------------------------------------------------------------------------
+
+class GeminiEmbeddingProvider(EmbeddingProvider):
+    """Google Gemini gemini-embedding-001 (768-dim).
+
+    Hardened against the failure modes that previously caused ``skein up``
+    to hang:
+
+    - Per-request hard timeout (``REQUEST_TIMEOUT``) enforced via a private
+      thread pool — even a stuck HTTP socket can't block ingest.
+    - Limited retries with exponential backoff on transient errors
+      (rate-limit, 5xx, timeout).
+    - After ``FAIL_THRESHOLD`` consecutive failures, returns zero vectors for
+      the rest of the batch and signals the caller via ``self.degraded``.
+      Ingest then continues — chunks still land in FTS5 for keyword search.
+    - Tries the batch API first (one HTTP call per ``embed()``); falls back
+      to one-text-at-a-time for SDK versions that reject lists.
+    """
+
+    dimension: int = 768
+    model: str = "gemini-embedding-001"
+
+    REQUEST_TIMEOUT: float = 15.0       # per-call hard timeout in seconds
+    MAX_RETRIES: int = 2                # extra attempts after the first try
+    FAIL_THRESHOLD: int = 3             # consecutive failures before bailing
+
+    def __init__(self, request_timeout: Optional[float] = None) -> None:
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "GEMINI_API_KEY environment variable is not set. "
+                "Set it or switch embedding_provider to 'hash' in your config."
+            )
+        try:
+            import google.genai as genai  # type: ignore
+            self._client = genai.Client(api_key=api_key)
+        except ImportError as e:
+            raise ImportError(
+                "google-genai package is required for the Gemini provider. "
+                "Install it: pip install google-genai"
+            ) from e
+
+        if request_timeout is not None:
+            self.REQUEST_TIMEOUT = request_timeout
+
+        # Per-instance state for the degraded path. Reset on every embed().
+        self.degraded: bool = False
+        self._supports_batch: Optional[bool] = None  # tri-state, lazily probed
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        self.degraded = False
+
+        # Try batch first — one HTTP call, far cheaper for typical 32-text
+        # ingest batches. If the SDK doesn't support a list payload, remember
+        # that for the rest of the session.
+        if self._supports_batch is not False:
+            batch = self._try_batch(texts)
+            if batch is not None:
+                return batch
+            # Batch path failed for a non-shape reason — the per-text fallback
+            # below covers it without re-probing.
+
+        return self._embed_per_text(texts)
+
+    # ------------------------------------------------------------------
+    # Batch path
+    # ------------------------------------------------------------------
+
+    def _try_batch(self, texts: List[str]) -> Optional[List[List[float]]]:
+        """Single HTTP call for the whole list. Returns None if the SDK
+        rejects the list shape (we then fall back to per-text)."""
+        try:
+            resp = self._call_with_timeout(lambda: self._client.models.embed_content(
+                model=self.model, contents=list(texts),
+            ))
+        except _ShapeError:
+            self._supports_batch = False
+            return None
+        except Exception as e:
+            logger.warning("gemini batch embed failed (%s); falling back to per-text", e)
+            return None
+
+        try:
+            embs = [list(e.values) for e in resp.embeddings]
+        except Exception as e:
+            logger.warning("gemini batch returned unexpected shape (%s); falling back", e)
+            return None
+
+        if len(embs) != len(texts):
+            logger.warning(
+                "gemini batch returned %d embeddings for %d texts; falling back",
+                len(embs), len(texts),
+            )
+            return None
+
+        self._supports_batch = True
+        return embs
+
+    # ------------------------------------------------------------------
+    # Per-text fallback (with retry + degrade)
+    # ------------------------------------------------------------------
+
+    def _embed_per_text(self, texts: List[str]) -> List[List[float]]:
+        results: List[List[float]] = []
+        consecutive_failures = 0
+
+        for i, text in enumerate(texts):
+            if consecutive_failures >= self.FAIL_THRESHOLD:
+                # Already gave up — short-circuit the rest with zeros.
+                results.append([0.0] * self.dimension)
+                continue
+
+            vec = self._embed_one_with_retry(text)
+            if vec is None:
+                consecutive_failures += 1
+                if consecutive_failures >= self.FAIL_THRESHOLD:
+                    self.degraded = True
+                    logger.warning(
+                        "gemini provider degraded: %d consecutive failures; "
+                        "remaining %d texts will get zero vectors (keyword-only)",
+                        consecutive_failures, len(texts) - i - 1,
+                    )
+                results.append([0.0] * self.dimension)
+            else:
+                consecutive_failures = 0
+                results.append(vec)
+
+        return results
+
+    def _embed_one_with_retry(self, text: str) -> Optional[List[float]]:
+        last_err: Optional[Exception] = None
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                resp = self._call_with_timeout(lambda: self._client.models.embed_content(
+                    model=self.model, contents=text,
+                ))
+                return list(resp.embeddings[0].values)
+            except FutureTimeout as e:
+                last_err = e
+            except Exception as e:
+                last_err = e
+                if not _is_retryable(e):
+                    break
+            if attempt < self.MAX_RETRIES:
+                time.sleep(min(2 ** attempt, 4.0))
+        if last_err is not None:
+            logger.debug("gemini embed dropped text after retries: %s", last_err)
+        return None
+
+    # ------------------------------------------------------------------
+    # Hard timeout via thread pool
+    # ------------------------------------------------------------------
+
+    def _call_with_timeout(self, fn):
+        """Run ``fn()`` in a daemon thread with a hard timeout.
+
+        Daemon thread = a stuck SDK request can never block process exit, even
+        though we can't actually cancel it (Python doesn't expose thread
+        cancellation). Raises FutureTimeout on expiry.
+        """
+        import threading
+        result: List = [None]
+        error: List[Optional[BaseException]] = [None]
+
+        def runner():
+            try:
+                result[0] = fn()
+            except BaseException as e:  # incl. KeyboardInterrupt
+                error[0] = e
+
+        t = threading.Thread(target=runner, daemon=True, name="gemini-embed")
+        t.start()
+        t.join(timeout=self.REQUEST_TIMEOUT)
+        if t.is_alive():
+            raise FutureTimeout(
+                f"gemini embed timed out after {self.REQUEST_TIMEOUT}s"
+            )
+        if error[0] is not None:
+            raise error[0]
+        return result[0]
+
+
+# ---------------------------------------------------------------------------
+# Helpers used by the Gemini provider
+# ---------------------------------------------------------------------------
+
+class _ShapeError(Exception):
+    """Marker: the SDK rejected the batch shape (list payload)."""
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Heuristic: retry on rate limits, 5xx, and obvious transient issues."""
+    msg = str(exc).lower()
+    if "429" in msg or "rate" in msg or "quota" in msg:
+        return True
+    if "timeout" in msg or "timed out" in msg:
+        return True
+    code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if isinstance(code, int) and 500 <= code < 600:
+        return True
+    if any(s in msg for s in ("500", "502", "503", "504", "unavailable",
+                              "connection", "reset")):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# OpenAI provider
+# ---------------------------------------------------------------------------
+
+class OpenAIEmbeddingProvider(EmbeddingProvider):
+    """OpenAI text-embedding-3-small (1536-dim)."""
+
+    dimension: int = 1536
+    model: str = "text-embedding-3-small"
+
+    def __init__(self) -> None:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "OPENAI_API_KEY environment variable is not set."
+            )
+        try:
+            from openai import OpenAI  # type: ignore
+            self._client = OpenAI(api_key=api_key)
+        except ImportError as e:
+            raise ImportError(
+                "openai package is required. Install it: pip install openai"
+            ) from e
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        resp = self._client.embeddings.create(model=self.model, input=texts)
+        return [item.embedding for item in sorted(resp.data, key=lambda x: x.index)]
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+def get_provider(name: str) -> EmbeddingProvider:
+    """Return an embedding provider by name."""
+    name = name.lower().strip()
+    if name == "hash":
+        return HashEmbeddingProvider()
+    elif name == "gemini":
+        return GeminiEmbeddingProvider()
+    elif name == "openai":
+        return OpenAIEmbeddingProvider()
+    else:
+        raise ValueError(
+            f"Unknown embedding provider '{name}'. "
+            "Valid options: hash, gemini, openai"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Numpy helpers
+# ---------------------------------------------------------------------------
+
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity between two 1-D float32 arrays."""
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return float(np.dot(a, b) / (norm_a * norm_b))
+
+
+def vec_to_bytes(vec: List[float]) -> bytes:
+    """Serialize a float list to raw float32 bytes for SQLite BLOB storage."""
+    return np.array(vec, dtype=np.float32).tobytes()
+
+
+def bytes_to_vec(raw: bytes, dimension: int) -> np.ndarray:
+    """Deserialize float32 bytes back to a numpy array."""
+    arr = np.frombuffer(raw, dtype=np.float32)
+    if len(arr) != dimension:
+        # Dimension mismatch — return zeros (graceful fallback)
+        return np.zeros(dimension, dtype=np.float32)
+    return arr.copy()

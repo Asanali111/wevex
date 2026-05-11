@@ -1,0 +1,31 @@
+[build]
+# Use incremental compilation for faster rebuilds (default on dev, but explicit)
+incremental = true
+# Number of parallel jobs (4-core machine)
+jobs = 4
+
+[profile.dev]
+# No optimization for fastest debug compilation
+opt-level = 0
+# Minimal debug info for speed
+debug = 0
+# More codegen units = faster compilation but slower runtime (good for dev)
+codegen-units = 256
+# No LTO in dev
+lto = false
+# Incremental on
+incremental = true
+
+[profile.dev.package."*"]
+# Apply same speed optimizations to all dependency packages
+opt-level = 0
+debug = false
+codegen-units = 256
+incremental = true
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = true
+codegen-units = 1
+incremental = false

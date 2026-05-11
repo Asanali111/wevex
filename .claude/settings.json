@@ -1,0 +1,52 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "__skein_managed": true,
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SKEIN_SCOPE=project:company-brain /usr/local/bin/skein hook session-start"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "__skein_managed": true,
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SKEIN_SCOPE=project:company-brain /usr/local/bin/skein hook user-prompt-submit"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "__skein_managed": true,
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SKEIN_SCOPE=project:company-brain /usr/local/bin/skein hook stop"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "__skein_managed": true,
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SKEIN_SCOPE=project:company-brain /usr/local/bin/skein hook post-tool-use"
+          }
+        ]
+      }
+    ]
+  }
+}
