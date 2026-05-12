@@ -47,6 +47,12 @@ class ScannedFact:
     source_file: Optional[str] = None   # relative path inside project root
     tags: List[str] = field(default_factory=list)
     territory: Optional[str] = None
+    # Stable identifier for this *fact slot*. Two scans that emit the same
+    # ``topic_key`` are about the same thing — if their content differs, the
+    # newer emission supersedes the older fragment rather than coexisting.
+    # Without this, a scan of "Tests live in tests/ (N files)" piles up a new
+    # fragment every time N changes.
+    topic_key: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +99,7 @@ def _scan_package_json(root: Path) -> List[ScannedFact]:
         out.append(ScannedFact(
             content=f"This project's npm package name is `{name}`.",
             confidence=0.98, source_file="package.json", tags=["npm"],
+            topic_key="npm-project-name",
         ))
     # Runtime engines
     engines = data.get("engines", {})
@@ -100,6 +107,7 @@ def _scan_package_json(root: Path) -> List[ScannedFact]:
         out.append(ScannedFact(
             content=f"Node.js runtime: `{engines['node']}` (per package.json engines).",
             confidence=0.95, source_file="package.json", tags=["node", "runtime"],
+            topic_key="npm-engines-node",
         ))
     # Production deps → one fact per notable dep
     deps = data.get("dependencies") or {}
@@ -109,6 +117,7 @@ def _scan_package_json(root: Path) -> List[ScannedFact]:
             content=f"Uses npm package `{dep}` ({ver}).",
             confidence=0.92, source_file="package.json",
             tags=["npm", "dep", dep],
+            topic_key=f"npm-dep:{dep.lower()}",
         ))
     # Scripts
     scripts = data.get("scripts") or {}
@@ -119,6 +128,7 @@ def _scan_package_json(root: Path) -> List[ScannedFact]:
                 type="procedure",
                 confidence=0.88, source_file="package.json",
                 tags=["npm", "script"],
+                topic_key=f"npm-script:{canonical}",
             ))
     return out
 
@@ -142,6 +152,7 @@ def _scan_pyproject_toml(root: Path) -> List[ScannedFact]:
         out.append(ScannedFact(
             content=f"This project's Python package name is `{name}`.",
             confidence=0.98, source_file="pyproject.toml", tags=["python"],
+            topic_key="python-project-name",
         ))
     py_req = proj.get("requires-python")
     if py_req:
@@ -149,6 +160,7 @@ def _scan_pyproject_toml(root: Path) -> List[ScannedFact]:
             content=f"Python version requirement: `{py_req}`.",
             confidence=0.97, source_file="pyproject.toml",
             tags=["python", "runtime"],
+            topic_key="python-version-req",
         ))
     deps = proj.get("dependencies") or []
     for d in deps[:60]:  # cap for sanity
@@ -161,6 +173,7 @@ def _scan_pyproject_toml(root: Path) -> List[ScannedFact]:
             content=f"Uses Python package `{pkg}` (declared: `{d}`).",
             confidence=0.93, source_file="pyproject.toml",
             tags=["python", "dep", pkg.lower()],
+            topic_key=f"python-dep:{pkg.lower()}",
         ))
     # Test runner inference
     tool = data.get("tool", {}) or {}
@@ -169,11 +182,13 @@ def _scan_pyproject_toml(root: Path) -> List[ScannedFact]:
             content="Test runner: pytest.",
             confidence=0.95, source_file="pyproject.toml",
             tags=["testing", "pytest"],
+            topic_key="python-test-runner",
         ))
     if "ruff" in tool:
         out.append(ScannedFact(
             content="Linter: ruff (configured in pyproject.toml).",
             confidence=0.95, source_file="pyproject.toml", tags=["linting", "ruff"],
+            topic_key="python-linter",
         ))
     return out
 
@@ -195,6 +210,7 @@ def _scan_requirements_txt(root: Path) -> List[ScannedFact]:
             content=f"Uses Python package `{pkg}` (from requirements.txt: `{line}`).",
             confidence=0.93, source_file="requirements.txt",
             tags=["python", "dep", pkg.lower()],
+            topic_key=f"python-dep:{pkg.lower()}",
         ))
     return out[:60]
 
@@ -212,12 +228,14 @@ def _scan_dockerfile(root: Path) -> List[ScannedFact]:
         out.append(ScannedFact(
             content=f"Container base image: `{base}` (from Dockerfile).",
             confidence=0.97, source_file="Dockerfile", tags=["docker", "runtime"],
+            topic_key="docker-base-image",
         ))
     # Exposed ports
     for port_m in re.finditer(r"^\s*EXPOSE\s+(\d+)", text, re.MULTILINE | re.IGNORECASE):
         out.append(ScannedFact(
             content=f"Service exposes port `{port_m.group(1)}` (Dockerfile EXPOSE).",
             confidence=0.95, source_file="Dockerfile", tags=["docker", "network"],
+            topic_key=f"docker-expose:{port_m.group(1)}",
         ))
     # CMD/ENTRYPOINT
     cmd_m = re.search(r"^\s*(CMD|ENTRYPOINT)\s+(.+)$", text, re.MULTILINE | re.IGNORECASE)
@@ -227,6 +245,7 @@ def _scan_dockerfile(root: Path) -> List[ScannedFact]:
             content=f"Container startup command: `{cmd_text}` (Dockerfile {cmd_m.group(1)}).",
             type="procedure",
             confidence=0.90, source_file="Dockerfile", tags=["docker", "startup"],
+            topic_key="docker-startup",
         ))
     return out
 
@@ -250,6 +269,7 @@ def _scan_compose(root: Path) -> List[ScannedFact]:
             out.append(ScannedFact(
                 content=f"Docker Compose service: `{svc}` (defined in {p.name}).",
                 confidence=0.88, source_file=p.name, tags=["docker-compose", svc],
+                topic_key=f"compose-service:{svc}",
             ))
     return out
 
@@ -275,6 +295,7 @@ def _scan_gitignore(root: Path) -> List[ScannedFact]:
             out.append(ScannedFact(
                 content=fact, confidence=0.82, source_file=".gitignore",
                 tags=["stack-inference"],
+                topic_key=f"gitignore:{pattern}",
             ))
     return out
 
@@ -290,6 +311,7 @@ def _scan_ci(root: Path) -> List[ScannedFact]:
             content=f"CI: GitHub Actions ({len(workflow_files)} workflow file(s) in .github/workflows/).",
             confidence=0.97, source_file=".github/workflows/",
             tags=["ci", "github-actions"],
+            topic_key="ci-github-actions",
         ))
     return out
 
@@ -304,6 +326,7 @@ def _scan_test_layout(root: Path) -> List[ScannedFact]:
                 content=f"Tests live in `{candidate}` ({n_files} files).",
                 type="preference",
                 confidence=0.92, source_file=candidate, tags=["testing", "layout"],
+                topic_key="tests-layout",
             ))
             break
     return out
@@ -323,6 +346,7 @@ def _scan_readme(root: Path) -> List[ScannedFact]:
             out.append(ScannedFact(
                 content=f"Project title (per README.md): `{title}`.",
                 confidence=0.95, source_file="README.md", tags=["meta"],
+                topic_key="readme-title",
             ))
     # First non-heading paragraph after the title → tagline
     para_m = re.search(r"^>?\s*(.+?)\n\s*$", text, re.MULTILINE)
@@ -330,6 +354,7 @@ def _scan_readme(root: Path) -> List[ScannedFact]:
         out.append(ScannedFact(
             content=f"README tagline: \"{para_m.group(1).strip()}\".",
             confidence=0.80, source_file="README.md", tags=["meta"],
+            topic_key="readme-tagline",
         ))
     return out
 

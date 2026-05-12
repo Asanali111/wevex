@@ -99,6 +99,37 @@ def test_scan_test_layout(tmp_path: Path) -> None:
     layout = [f for f in facts if "Tests live" in f.content]
     assert layout
     assert layout[0].type == "preference"
+    assert layout[0].topic_key == "tests-layout"
+
+
+def test_scanner_stamps_stable_topic_keys(tmp_path: Path) -> None:
+    """Every auto-promoted scanner emission needs a topic_key so that the
+    next scan with mutated content (e.g. file count, dep version) can
+    supersede instead of duplicating."""
+    pyproject = """\
+[project]
+name = "myproj"
+requires-python = ">=3.10"
+dependencies = ["fastapi>=0.100"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+"""
+    (tmp_path / "pyproject.toml").write_text(pyproject)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("")
+    (tmp_path / "README.md").write_text("# My Project\n\nA tagline.\n")
+    facts = scan_project(tmp_path)
+    # Every high-confidence (auto-promoted) fact should have a topic_key
+    for f in facts:
+        if f.confidence >= 0.90:
+            assert f.topic_key, f"missing topic_key on: {f.content!r}"
+    # Keys should be distinct across different facts in the same scan
+    keys = [f.topic_key for f in facts if f.topic_key]
+    assert len(keys) == len(set(keys)), f"duplicate topic_keys: {keys}"
 
 
 def test_scan_readme_title(tmp_path: Path) -> None:
