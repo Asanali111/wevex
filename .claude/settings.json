@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SKEIN_SCOPE=project:company-brain /usr/local/bin/skein hook session-start"
+            "command": "SKEIN_SCOPE=project:ameliomar /usr/local/bin/skein hook session-start"
           }
         ]
       }
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SKEIN_SCOPE=project:company-brain /usr/local/bin/skein hook user-prompt-submit"
+            "command": "SKEIN_SCOPE=project:ameliomar /usr/local/bin/skein hook user-prompt-submit"
           }
         ]
       }
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SKEIN_SCOPE=project:company-brain /usr/local/bin/skein hook stop"
+            "command": "SKEIN_SCOPE=project:ameliomar /usr/local/bin/skein hook stop"
           }
         ]
       }
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SKEIN_SCOPE=project:company-brain /usr/local/bin/skein hook post-tool-use"
+            "command": "SKEIN_SCOPE=project:ameliomar /usr/local/bin/skein hook post-tool-use"
           }
         ]
       }

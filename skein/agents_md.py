@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .models import Fragment
 from .storage import Storage
@@ -82,6 +82,42 @@ def render_agents_md(
     lines.append(f'remember(content="<what you decided>", type="decision", scope="{scope_handle}")')
     lines.append("```")
     lines.append("")
+
+    # ---- Project facts (auto-extracted, iter 14.1 + 14.2) ----
+    # Surface the implicit context Skein has learned from the codebase + chat
+    # transcripts. These auto-extracted facts are what every LLM should start
+    # with before answering anything — they capture stack, conventions, and
+    # decisions that aren't in any one source file.
+    fact_frags = [
+        f for f in all_frags
+        if f.type == "fact" and f.extraction_method != "explicit"
+    ]
+    if fact_frags:
+        lines.append("## Project facts (auto-detected)")
+        lines.append("")
+        lines.append(
+            "Skein extracted these facts from your codebase and recent AI "
+            "conversations. Treat them as authoritative project context."
+        )
+        lines.append("")
+        # Group by source tool for clarity
+        by_tool: Dict[str, List] = {}
+        for f in fact_frags:
+            tool = f.created_by_tool or "unknown"
+            by_tool.setdefault(tool, []).append(f)
+        for tool, items in by_tool.items():
+            label = {
+                "code-scanner": "From the codebase",
+                "transcript-claude": "From recent Claude Code sessions",
+                "transcript-cursor": "From recent Cursor sessions",
+            }.get(tool, f"From {tool}")
+            lines.append(f"### {label}")
+            lines.append("")
+            for f in items[:30]:  # cap per source
+                _append_fragment_bullet(lines, f)
+            if len(items) > 30:
+                lines.append(f"*… and {len(items) - 30} more from {tool} — call `recall` for the full list.*")
+            lines.append("")
 
     # ---- Requirements ----
     reqs = [f for f in permanent if f.type == "requirement"]

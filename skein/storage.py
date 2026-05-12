@@ -92,12 +92,197 @@ class Storage:
     def _init_schema(self) -> None:
         if self.db_path in Storage._initialized_paths:
             return
+        # Pre-migrations FIRST — schema.sql references the provenance columns
+        # in CREATE INDEX statements, which would fail on a legacy DB that
+        # hasn't had them added yet. So we add the columns first, then run
+        # the IF-NOT-EXISTS schema script second.
+        if self._fragments_table_exists():
+            self._migrate_provenance_columns()
         schema_path = Path(__file__).parent / "schema.sql"
         sql = schema_path.read_text()
         # executescript handles multi-statement SQL (including triggers with
         # BEGIN…END blocks) correctly.  It also commits any open transaction.
         self._conn.executescript(sql)
         Storage._initialized_paths.add(self.db_path)
+
+    def _fragments_table_exists(self) -> bool:
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='fragments'"
+        ).fetchone()
+        return row is not None
+
+    # ------------------------------------------------------------------
+    # MCP client tracking (iter 14.0b)
+    # Maps a bearer token prefix → which LLM client introduced itself in
+    # its ``initialize`` handshake. Lets us tag every fragment with its
+    # originating tool (``claude-code``, ``cursor``, …) without making the
+    # user manage per-client tokens.
+    # ------------------------------------------------------------------
+
+    def upsert_mcp_client(self, token_prefix: str, client_name: str,
+                          display_name: Optional[str] = None) -> None:
+        """Register or update the client for this token prefix."""
+        self._conn.execute(
+            """INSERT INTO mcp_clients (token_prefix, client_name, display_name, created_at)
+               VALUES (?, ?, ?, datetime('now'))
+               ON CONFLICT(token_prefix) DO UPDATE SET
+                 client_name = excluded.client_name,
+                 display_name = COALESCE(excluded.display_name, mcp_clients.display_name)""",
+            (token_prefix, client_name, display_name),
+        )
+
+    def get_client_for_token_prefix(self, token_prefix: str) -> Optional[str]:
+        """Return the registered client_name for this token prefix, or None."""
+        row = self._conn.execute(
+            "SELECT client_name FROM mcp_clients WHERE token_prefix = ?",
+            (token_prefix,),
+        ).fetchone()
+        return row["client_name"] if row else None
+
+    def list_mcp_clients(self) -> List[Dict[str, Any]]:
+        """All registered clients, newest first. Used by `skein clients`."""
+        rows = self._conn.execute(
+            "SELECT token_prefix, client_name, display_name, created_at "
+            "FROM mcp_clients ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Extraction candidates (iter 14.1 / 14.2)
+    # The inbox queue: passive watchers (code scanner, transcript extractor)
+    # write here. Users approve via ``skein inbox approve <id>``.
+    # ------------------------------------------------------------------
+
+    def add_extraction_candidate(
+        self, *, scope_id: str, content: str, type: str,
+        confidence: float, source_tool: str,
+        territory: Optional[str] = None, tags: Optional[List[str]] = None,
+        source_session_id: Optional[str] = None,
+        source_file: Optional[str] = None,
+        source_message_ts: Optional[str] = None,
+    ) -> Optional[str]:
+        """Insert a pending candidate. Returns the new id, or None if a
+        duplicate already exists (dedup is by scope_id + content + source_tool).
+        """
+        candidate_id = _new_id()
+        try:
+            self._conn.execute(
+                """INSERT INTO extraction_candidates
+                   (id, scope_id, content, type, territory, tags, confidence,
+                    source_tool, source_session_id, source_file, source_message_ts,
+                    status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))""",
+                (candidate_id, scope_id, content, type, territory,
+                 json.dumps(tags or []), confidence,
+                 source_tool, source_session_id, source_file, source_message_ts),
+            )
+            return candidate_id
+        except sqlite3.IntegrityError:
+            # Dedup hit: same (scope, content, tool) already queued — skip silently
+            return None
+
+    def list_extraction_candidates(
+        self, *, status: str = "pending", scope_id: Optional[str] = None,
+        limit: int = 50, offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        conditions = ["status = ?"]
+        params: List[Any] = [status]
+        if scope_id:
+            conditions.append("scope_id = ?")
+            params.append(scope_id)
+        where = " AND ".join(conditions)
+        params.extend([limit, offset])
+        rows = self._conn.execute(
+            f"SELECT * FROM extraction_candidates WHERE {where} "
+            f"ORDER BY confidence DESC, created_at DESC LIMIT ? OFFSET ?",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_extraction_candidate(self, candidate_id: str) -> Optional[Dict[str, Any]]:
+        row = self._conn.execute(
+            "SELECT * FROM extraction_candidates WHERE id = ?", (candidate_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def mark_candidate_status(
+        self, candidate_id: str, status: str,
+        promoted_fragment_id: Optional[str] = None,
+    ) -> bool:
+        n = self._conn.execute(
+            "UPDATE extraction_candidates SET status = ?, reviewed_at = datetime('now'), "
+            "promoted_fragment_id = COALESCE(?, promoted_fragment_id) "
+            "WHERE id = ? AND status = 'pending'",
+            (status, promoted_fragment_id, candidate_id),
+        ).rowcount
+        return n > 0
+
+    def count_extraction_candidates(self, status: str = "pending") -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS c FROM extraction_candidates WHERE status = ?",
+            (status,),
+        ).fetchone()
+        return int(row["c"])
+
+    # ------------------------------------------------------------------
+    # Transcript cursors (iter 14.2)
+    # ------------------------------------------------------------------
+
+    def get_transcript_cursor(self, file_path: str) -> int:
+        row = self._conn.execute(
+            "SELECT last_byte_offset FROM transcript_cursors WHERE file_path = ?",
+            (file_path,),
+        ).fetchone()
+        return int(row["last_byte_offset"]) if row else 0
+
+    def set_transcript_cursor(self, file_path: str, last_byte_offset: int,
+                               client_name: str = "claude-code") -> None:
+        self._conn.execute(
+            """INSERT INTO transcript_cursors (file_path, last_byte_offset, last_seen_at, client_name)
+               VALUES (?, ?, datetime('now'), ?)
+               ON CONFLICT(file_path) DO UPDATE SET
+                 last_byte_offset = excluded.last_byte_offset,
+                 last_seen_at = datetime('now')""",
+            (file_path, last_byte_offset, client_name),
+        )
+
+    # ------------------------------------------------------------------
+    # Migrations — kept inline because Skein deliberately ships a single
+    # SQLite file and doesn't want an Alembic-style migrations dir.
+    # Each migration helper is a no-op if it's already been applied.
+    # ------------------------------------------------------------------
+
+    def _migrate_provenance_columns(self) -> None:
+        """Add iter-14.0 provenance columns to ``fragments`` if missing.
+
+        New installs get the columns via ``schema.sql``'s CREATE TABLE; old
+        installs (anything created before iter 14) need ALTER TABLE. SQLite
+        ALTER TABLE doesn't support IF NOT EXISTS, so we introspect first.
+        """
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(fragments)")
+        }
+        wanted: List[tuple] = [
+            ("created_by_tool",          "TEXT"),
+            ("created_in_session_id",    "TEXT"),
+            ("created_against_commit",   "TEXT"),
+            ("files_open_at_creation",   "TEXT NOT NULL DEFAULT '[]'"),
+            ("supersedes_fragment_id",   "TEXT REFERENCES fragments(id)"),
+            ("superseded_by_fragment_id","TEXT REFERENCES fragments(id)"),
+            ("extraction_method",        "TEXT NOT NULL DEFAULT 'explicit'"),
+            ("extraction_confidence",    "REAL"),
+        ]
+        for col_name, col_def in wanted:
+            if col_name in existing:
+                continue
+            try:
+                self._conn.execute(
+                    f"ALTER TABLE fragments ADD COLUMN {col_name} {col_def}"
+                )
+            except sqlite3.OperationalError:
+                # Race with another connection that already added it. Safe.
+                pass
 
     # ------------------------------------------------------------------
     # Identity
@@ -124,7 +309,15 @@ class Storage:
         existing = self.get_identity(data.handle)
         if existing:
             return existing
-        return self.create_identity(data)
+        try:
+            return self.create_identity(data)
+        except sqlite3.IntegrityError:
+            # Race: another thread/connection inserted the same handle
+            # between our SELECT and INSERT. Re-query the canonical row.
+            again = self.get_identity(data.handle)
+            if again is not None:
+                return again
+            raise
 
     def list_identities(self, limit: int = 100, offset: int = 0) -> List[Identity]:
         rows = self._conn.execute(
@@ -228,16 +421,34 @@ class Storage:
                (id, type, content, scope_id, owner_id, confidence, version,
                 ttl_seconds, expires_at, permanent, is_stale, stale_reason,
                 tags, territory, source_commit_id, metadata, content_embedding,
+                created_by_tool, created_in_session_id, created_against_commit,
+                files_open_at_creation, supersedes_fragment_id,
+                extraction_method, extraction_confidence,
                 created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 0, NULL,
-                       ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?)""",
             (frag_id, data.type, data.content, data.scope_id, data.owner_id,
              data.confidence, data.ttl_seconds, expires_at,
              1 if permanent else 0,
              json.dumps(data.tags), data.territory, commit_id,
              json.dumps(data.metadata), embedding,
+             data.created_by_tool, data.created_in_session_id,
+             data.created_against_commit,
+             json.dumps(data.files_open_at_creation),
+             data.supersedes_fragment_id,
+             data.extraction_method, data.extraction_confidence,
              now, now),
         )
+
+        # If this fragment supersedes another, keep the reverse pointer in sync
+        # so future queries can walk the chain in either direction.
+        if data.supersedes_fragment_id:
+            self._conn.execute(
+                "UPDATE fragments SET superseded_by_fragment_id = ? WHERE id = ?",
+                (frag_id, data.supersedes_fragment_id),
+            )
 
         return Fragment(
             id=frag_id, type=data.type, content=data.content,
@@ -247,6 +458,13 @@ class Storage:
             permanent=permanent, is_stale=False,
             tags=data.tags, territory=data.territory,
             source_commit_id=commit_id, metadata=data.metadata,
+            created_by_tool=data.created_by_tool,
+            created_in_session_id=data.created_in_session_id,
+            created_against_commit=data.created_against_commit,
+            files_open_at_creation=data.files_open_at_creation,
+            supersedes_fragment_id=data.supersedes_fragment_id,
+            extraction_method=data.extraction_method,
+            extraction_confidence=data.extraction_confidence,
             created_at=now, updated_at=now,
         )
 
@@ -326,7 +544,9 @@ class Storage:
                         type_filter: Optional[str] = None,
                         include_stale: bool = False,
                         limit: int = 50,
-                        offset: int = 0) -> List[Fragment]:
+                        offset: int = 0,
+                        since: Optional[str] = None,
+                        exclude_tool: Optional[str] = None) -> List[Fragment]:
         conditions = ["1=1"]
         params: List[Any] = []
 
@@ -341,6 +561,14 @@ class Storage:
             conditions.append(
                 "(expires_at IS NULL OR expires_at > datetime('now'))"
             )
+        if since:
+            conditions.append("created_at > ?")
+            params.append(since)
+        if exclude_tool:
+            # NULL-tolerant: fragments without a recorded tool still count
+            # as "not from <exclude_tool>".
+            conditions.append("(created_by_tool IS NULL OR created_by_tool != ?)")
+            params.append(exclude_tool)
 
         where = " AND ".join(conditions)
         rows = self._conn.execute(
@@ -1002,6 +1230,15 @@ def _row_to_commit(row: sqlite3.Row) -> Commit:
 
 
 def _row_to_fragment(row: sqlite3.Row) -> Fragment:
+    # Provenance columns may be absent on rows from a pre-iter-14 DB even
+    # after migration if the row isn't yet refreshed — defensively access.
+    def _maybe(col: str, default=None):
+        try:
+            return row[col]
+        except (IndexError, KeyError):
+            return default
+
+    files_open_raw = _maybe("files_open_at_creation", "[]") or "[]"
     return Fragment(
         id=row["id"], type=row["type"], content=row["content"],
         scope_id=row["scope_id"], owner_id=row["owner_id"],
@@ -1013,6 +1250,14 @@ def _row_to_fragment(row: sqlite3.Row) -> Fragment:
         territory=row["territory"],
         source_commit_id=row["source_commit_id"],
         metadata=json.loads(row["metadata"]),
+        created_by_tool=_maybe("created_by_tool"),
+        created_in_session_id=_maybe("created_in_session_id"),
+        created_against_commit=_maybe("created_against_commit"),
+        files_open_at_creation=json.loads(files_open_raw),
+        supersedes_fragment_id=_maybe("supersedes_fragment_id"),
+        superseded_by_fragment_id=_maybe("superseded_by_fragment_id"),
+        extraction_method=_maybe("extraction_method", "explicit") or "explicit",
+        extraction_confidence=_maybe("extraction_confidence"),
         created_at=row["created_at"], updated_at=row["updated_at"],
     )
 

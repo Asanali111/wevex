@@ -210,9 +210,10 @@ What each hook does:
 
 The hooks talk to the SQLite DB **directly**, so they:
 
-- Run with sub-100ms latency (no HTTP round trip)
+- Run with sub-100ms latency on the warm path (no HTTP round trip)
 - Continue working when the daemon isn't running
 - Use whatever embedding provider is configured (auto-skip vector if none works)
+- Cold-path (first hook firing after a long idle) is closer to 1 s due to Python interpreter + module imports; warm-up scripts in `~/.skein/cache/` mitigate this on macOS but it's not free
 
 **Multi-tool scenario:** Open Claude Code in a hook-installed project and ask it to make a decision. Close it. Open Cursor in the same project — it reads `AGENTS.md` (rendered from the same fragments) and reads its rule file (which tells it to `recall` proactively). Cursor sees the decision Claude just made.
 
@@ -305,7 +306,9 @@ Both share the same scope hierarchy and hybrid-retrieval pipeline, but they're i
 
 ### Scaling notes
 
-The default vector search streams chunk embeddings from SQLite in batches of 5,000 and computes cosine similarity with NumPy. On a modern laptop this is ≤200 ms for 50k chunks at 768 dim — comfortably fast for a single project. For million-chunk codebases, swap in [`sqlite-vec`](https://github.com/asg017/sqlite-vec) or [`usearch`](https://github.com/unum-cloud/usearch) — both can drop in behind `Storage.chunks_vector_search` without schema changes.
+The default vector search streams chunk embeddings from SQLite in batches of 5,000 and computes cosine similarity with NumPy. On a modern laptop, measured numbers from `skein doctor --perf` on a 566-chunk repo: code search p50 ≈ 14 ms (worst-case 27 ms). The brute-force cosine is O(N) and starts to feel slow past ~50k chunks — for larger codebases, swap in [`sqlite-vec`](https://github.com/asg017/sqlite-vec) or [`usearch`](https://github.com/unum-cloud/usearch); both can drop in behind `Storage.chunks_vector_search` without schema changes.
+
+Verify against your own DB with `skein doctor --perf`.
 
 ---
 
@@ -365,7 +368,7 @@ Config file: `~/.config/skein/config.json` (created by `skein init`).
 | `port` | 8765 | `SKEIN_PORT` |
 | `host` | 127.0.0.1 | `SKEIN_HOST` |
 | `db_path` | `~/.config/skein/skein.db` | `SKEIN_DB_PATH` |
-| `embedding_provider` | `hash` | `SKEIN_EMBEDDING_PROVIDER` |
+| `embedding_provider` | `bm25` (auto-detects `gemini` / `openai` if their API key is set) | `SKEIN_EMBEDDING_PROVIDER` |
 | `bearer_token` | (generated) | `SKEIN_BEARER_TOKEN` |
 | `default_scope` | `project:default` | `SKEIN_DEFAULT_SCOPE` |
 
@@ -381,7 +384,7 @@ pip install -e ".[test]"
 pytest tests/ -v
 ```
 
-229 tests covering storage, retrieval, REST API, MCP JSON-RPC, AGENTS.md renderer, sync (including Antigravity), the autonomous hook system, the codebase RAG layer (ingest + chunks search), the cross-platform daemon manager (launchd / systemd-user / nohup with TCC auto-relocate), scope auto-detection from git remotes, the `.skein/scope` pin honoring across all CLI commands, the active-projects registry, the watcher's incremental dispatch (insert/update/prune on file changes + deletes), and the watcher-process manager (session-scoped subprocess spawn / kill / liveness checks).
+444 tests (as of iter 15) covering storage, retrieval, REST API, MCP JSON-RPC, AGENTS.md renderer, sync (including Antigravity), the autonomous hook system, the codebase RAG layer (ingest + chunks search), the cross-platform daemon manager (launchd / systemd-user / nohup with TCC auto-relocate), scope auto-detection from git remotes, the `.skein/scope` pin honoring across all CLI commands, the active-projects registry, the watcher's incremental dispatch, the code scanner, the git-commit decision watcher, the bm25/gemini provider auto-detection, the `.git`-required guard on `skein up`, and `skein doctor --perf` self-measurement.
 
 ---
 

@@ -22,7 +22,11 @@ DEFAULTS: Dict[str, Any] = {
     "port": 8765,
     "host": "127.0.0.1",
     "db_path": str(Path.home() / ".config" / "skein" / "skein.db"),
-    "embedding_provider": "hash",   # "hash" | "gemini" | "openai"
+    # ``bm25`` is the honest default — no fake vector embeddings, search
+    # uses FTS5 keyword matching. Real semantic search lights up when the
+    # user sets GEMINI_API_KEY (or OPENAI_API_KEY) and switches the provider.
+    # ``hash`` remains available for tests but emits a doctor warning.
+    "embedding_provider": "bm25",   # "bm25" | "gemini" | "openai" | "hash"
     "embedding_dimension": 768,
     "bearer_token": "",             # filled in by init
     "log_level": "info",
@@ -80,9 +84,44 @@ def _default_config_path() -> Path:
     return Path.home() / ".config" / "skein" / "config.json"
 
 
+def _load_dotenv_file(path: Path) -> None:
+    """Read a ``KEY=value`` .env file and seed ``os.environ`` with anything
+    not already set. Iter 15: lets the user keep ``GEMINI_API_KEY`` /
+    ``OPENAI_API_KEY`` in ``~/.config/skein/.env`` so the daemon picks them
+    up regardless of which shell (launchd, terminal, hook subprocess) is
+    starting it. Survives missing file silently.
+    """
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text()
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        # Strip optional surrounding quotes (KEY="value" / KEY='value')
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("\"", "'"):
+            value = value[1:-1]
+        # Don't clobber values already in the environment — the shell wins
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def load_config(path: Optional[Path] = None) -> SkeinConfig:
     """Load config from disk, then overlay SKEIN_* env vars."""
     p = path or _default_config_path()
+    # Iter 15: source ``~/.config/skein/.env`` (alongside the JSON config) so
+    # API keys are available to whatever process is loading config — this is
+    # the only safe place to put GEMINI_API_KEY when the daemon runs under
+    # launchd, which doesn't inherit the user's shell environment.
+    _load_dotenv_file(p.parent / ".env")
     data: Dict[str, Any] = {}
     if p.exists():
         with open(p) as f:

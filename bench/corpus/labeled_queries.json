@@ -1,0 +1,86 @@
+[
+  {
+    "id": "q01",
+    "difficulty": "easy",
+    "query": "PostgreSQL pgvector",
+    "expected_top": "f02",
+    "expected_in_top5": ["f02"]
+  },
+  {
+    "id": "q02",
+    "difficulty": "easy",
+    "query": "session caching",
+    "expected_top": "f01",
+    "expected_in_top5": ["f01"]
+  },
+  {
+    "id": "q03",
+    "difficulty": "easy",
+    "query": "OAuth2 PKCE mobile",
+    "expected_top": "f04",
+    "expected_in_top5": ["f04"]
+  },
+  {
+    "id": "q04",
+    "difficulty": "easy",
+    "query": "S3 user uploads",
+    "expected_top": "f05",
+    "expected_in_top5": ["f05"]
+  },
+  {
+    "id": "q05",
+    "difficulty": "easy",
+    "query": "API rate limit",
+    "expected_top": "f17",
+    "expected_in_top5": ["f17"]
+  },
+  {
+    "id": "q06",
+    "difficulty": "medium",
+    "query": "GDPR export",
+    "expected_top": "f09",
+    "expected_in_top5": ["f09", "f10"]
+  },
+  {
+    "id": "q07",
+    "difficulty": "medium",
+    "query": "JWT tokens lifetime",
+    "expected_top": "f18",
+    "expected_in_top5": ["f18"]
+  },
+  {
+    "id": "q08",
+    "difficulty": "medium",
+    "query": "prefer async Python",
+    "expected_top": "f13",
+    "expected_in_top5": ["f13"]
+  },
+  {
+    "id": "q09",
+    "difficulty": "medium",
+    "query": "production Python version",
+    "expected_top": "f21",
+    "expected_in_top5": ["f21"]
+  },
+  {
+    "id": "q10",
+    "difficulty": "hard",
+    "query": "What database are we using?",
+    "expected_top": "f02",
+    "expected_in_top5": ["f02"]
+  },
+  {
+    "id": "q11",
+    "difficulty": "hard",
+    "query": "How do I rotate a secret in production?",
+    "expected_top": "f22",
+    "expected_in_top5": ["f22"]
+  },
+  {
+    "id": "q12",
+    "difficulty": "hard",
+    "query": "Should we mock the ORM in tests?",
+    "expected_top": "f15",
+    "expected_in_top5": ["f15"]
+  }
+]

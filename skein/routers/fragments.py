@@ -72,6 +72,8 @@ def list_fragments(
     include_stale: bool = False,
     limit: int = Query(50, ge=1, le=200),
     offset: int = 0,
+    since: Optional[str] = Query(None, description="ISO 8601 timestamp; only return fragments created after this time"),
+    exclude_tool: Optional[str] = Query(None, description="Exclude fragments whose created_by_tool equals this value"),
     auth: AuthContext = RequireAuth,
     storage: Storage = Depends(get_storage),
 ) -> List[Fragment]:
@@ -85,6 +87,7 @@ def list_fragments(
     return storage.list_fragments(
         scope_id=scope_id, type_filter=type,
         include_stale=include_stale, limit=limit, offset=offset,
+        since=since, exclude_tool=exclude_tool,
     )
 
 

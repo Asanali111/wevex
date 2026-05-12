@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -60,10 +61,66 @@ async def lifespan(app: FastAPI):
     task1 = asyncio.create_task(_lease_cleanup_loop(storage, cfg.lease_cleanup_interval))
     task2 = asyncio.create_task(_stale_mark_loop(storage, cfg.stale_mark_interval))
 
+    # Common setup for the two passive watchers — both need their own SQLite
+    # handle per poll and the local-user identity.
+    from .models import IdentityCreate
+    from .auth import token_prefix as _tp
+
+    def _storage_factory():
+        return Storage(cfg.db_path)
+
+    def _get_owner(st):
+        ident = st.get_or_create_identity(IdentityCreate(
+            handle=f"user:{_tp(cfg.bearer_token)}",
+            type="user", name="local-user",
+        ))
+        return ident.id
+
+    # Git commit watcher (iter 15): the *primary* decision-capture path.
+    # Every new commit in a Skein-up'd repo becomes a `decision` fragment
+    # with the commit SHA as `created_against_commit`. Strictly better
+    # signal than chat extraction — devs write commit messages on purpose.
+    git_watcher = None
+    try:
+        from .git_watcher import MultiProjectGitWatcher
+        git_watcher = MultiProjectGitWatcher(
+            storage_factory=_storage_factory,
+            provider=provider,
+            get_owner_id=_get_owner,
+            poll_interval=10.0,
+        )
+        git_watcher.start()
+    except Exception:
+        logger.exception("Git commit watcher failed to start; skipping.")
+
+    # Transcript watcher (iter 14.2, demoted to opt-in in iter 15): tails
+    # Claude Code JSONL transcripts. Off by default because it produces noise
+    # the inbox has to filter; the git watcher is the better default path.
+    # Enable with: SKEIN_TRANSCRIPT_WATCHER=1
+    transcript_watcher = None
+    if os.environ.get("SKEIN_TRANSCRIPT_WATCHER") == "1":
+        try:
+            from .transcript_watcher import MultiProjectTranscriptWatcher
+            transcript_watcher = MultiProjectTranscriptWatcher(
+                storage_factory=_storage_factory,
+                provider=provider,
+                poll_interval=3.0,
+                get_owner_id=_get_owner,
+            )
+            transcript_watcher.start()
+        except Exception:
+            logger.exception("Transcript watcher failed to start; skipping.")
+
     yield
 
     task1.cancel()
     task2.cancel()
+    for w in (git_watcher, transcript_watcher):
+        if w is not None:
+            try:
+                w.stop(timeout=2.0)
+            except Exception:
+                pass
     storage.close()
     logger.info("Storage closed.")
 

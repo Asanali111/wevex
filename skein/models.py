@@ -156,6 +156,15 @@ class FragmentCreate(BaseModel):
     tags: List[str] = Field(default_factory=list)
     territory: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    # Provenance (iter 14.0). All optional — explicit MCP calls fill these
+    # automatically; manual REST calls may leave them blank.
+    created_by_tool: Optional[str] = None
+    created_in_session_id: Optional[str] = None
+    created_against_commit: Optional[str] = None
+    files_open_at_creation: List[str] = Field(default_factory=list)
+    supersedes_fragment_id: Optional[str] = None
+    extraction_method: str = Field("explicit", description="explicit | code-scan | transcript-claude | …")
+    extraction_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
 
     @field_validator("type")
     @classmethod
@@ -198,6 +207,7 @@ class Fragment(FragmentCreate):
     is_stale: bool = False
     stale_reason: Optional[str] = None
     source_commit_id: Optional[str] = None
+    superseded_by_fragment_id: Optional[str] = None  # mirror of the FK in DB
     created_at: str = Field(default_factory=_now_iso)
     updated_at: str = Field(default_factory=_now_iso)
 

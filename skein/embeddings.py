@@ -29,9 +29,17 @@ import math
 import os
 import time
 from concurrent.futures import TimeoutError as FutureTimeout
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
-import numpy as np
+# Numpy is lazy-loaded inside the functions that actually use it. At ~250 ms
+# import cost, it dominates daemon boot when only a fraction of requests touch
+# embeddings hot-paths. ``from __future__ import annotations`` (above) makes
+# the `np.ndarray` type hints in this file no-ops at runtime, so we don't need
+# the symbol at module top-level. Hot helpers (`vec_to_bytes`, `bytes_to_vec`,
+# `cosine_similarity`) import numpy on first call — Python caches sys.modules
+# so subsequent calls pay only a dict lookup.
+if TYPE_CHECKING:
+    import numpy as np  # noqa: F401  — purely for type-checker resolution
 
 logger = logging.getLogger("skein.embeddings")
 
@@ -44,6 +52,12 @@ class EmbeddingProvider:
     """Abstract base class."""
 
     dimension: int = 768
+    # Subclasses set this. ``is_real = True`` means embeddings produced by
+    # this provider are semantically meaningful (e.g. Gemini, OpenAI).
+    # ``is_real = False`` means embeddings are pseudo-random or zero —
+    # vector ranking is decorative for this provider, retrieval falls back
+    # to FTS5/BM25. ``skein doctor`` and the README rely on this marker.
+    is_real: bool = False
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         raise NotImplementedError
@@ -53,15 +67,44 @@ class EmbeddingProvider:
 
 
 # ---------------------------------------------------------------------------
-# Hash provider (offline, deterministic)
+# BM25-only provider (no vector — honest about being keyword-only)
+# ---------------------------------------------------------------------------
+
+class BM25OnlyProvider(EmbeddingProvider):
+    """Returns zero vectors so the vector retrieval path is a true no-op.
+
+    This is the default when the user hasn't configured a real embedding
+    provider. Search falls back to FTS5 (BM25 keyword matching) exclusively
+    — fast, honest, doesn't pretend to be semantic. To enable semantic
+    search, set ``GEMINI_API_KEY`` (or OPENAI_API_KEY) and run
+    ``skein config set embedding_provider gemini`` (or ``openai``).
+    """
+
+    dimension: int = 768
+    is_real: bool = False     # Marker the doctor / hooks can check
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        # Zero vectors. Stored embeddings will all be the zero vector,
+        # which produces zero cosine similarity to everything — vector
+        # search effectively becomes a no-op for ranking purposes.
+        return [[0.0] * self.dimension for _ in texts]
+
+
+# ---------------------------------------------------------------------------
+# Hash provider (legacy: deterministic but non-semantic)
 # ---------------------------------------------------------------------------
 
 class HashEmbeddingProvider(EmbeddingProvider):
     """Deterministic pseudo-embedding from SHA-256.
 
-    Not semantically meaningful — exists so the system runs offline
-    and tests are reproducible without an API key.
+    Not semantically meaningful — exists so tests are reproducible without
+    an API key. **Not for production use.** ``skein doctor`` warns when this
+    provider is active in a live config; the default for new installs is
+    ``bm25`` (which is honest about being keyword-only) when no real
+    embedding key is present.
     """
+
+    is_real: bool = False
 
     dimension: int = 768
 
@@ -87,6 +130,7 @@ class HashEmbeddingProvider(EmbeddingProvider):
                     break
             counter += 1
         # Normalize to unit vector
+        import numpy as np
         arr = np.array(floats, dtype=np.float32)
         norm = np.linalg.norm(arr)
         if norm > 0:
@@ -117,6 +161,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
 
     dimension: int = 768
     model: str = "gemini-embedding-001"
+    is_real: bool = True
 
     REQUEST_TIMEOUT: float = 15.0       # per-call hard timeout in seconds
     MAX_RETRIES: int = 2                # extra attempts after the first try
@@ -317,6 +362,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
     dimension: int = 1536
     model: str = "text-embedding-3-small"
+    is_real: bool = True
 
     def __init__(self) -> None:
         api_key = os.environ.get("OPENAI_API_KEY")
@@ -342,27 +388,47 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 # ---------------------------------------------------------------------------
 
 def get_provider(name: str) -> EmbeddingProvider:
-    """Return an embedding provider by name."""
+    """Return an embedding provider by name.
+
+    Valid names: ``bm25`` (no-op vector, FTS5-only), ``gemini``, ``openai``,
+    ``hash`` (legacy / tests only — warns if used in production).
+    """
     name = name.lower().strip()
+    if name in ("bm25", "none", "off"):
+        return BM25OnlyProvider()
     if name == "hash":
         return HashEmbeddingProvider()
-    elif name == "gemini":
+    if name == "gemini":
         return GeminiEmbeddingProvider()
-    elif name == "openai":
+    if name == "openai":
         return OpenAIEmbeddingProvider()
-    else:
-        raise ValueError(
-            f"Unknown embedding provider '{name}'. "
-            "Valid options: hash, gemini, openai"
-        )
+    raise ValueError(
+        f"Unknown embedding provider '{name}'. "
+        "Valid options: bm25, gemini, openai, hash"
+    )
+
+
+def best_available_provider_name() -> str:
+    """Pick the most capable provider for which credentials exist.
+
+    Used by ``skein init`` and ``skein up`` to default new installs to
+    semantic search when an API key is available, and to honest BM25-only
+    search otherwise.
+    """
+    if os.environ.get("GEMINI_API_KEY"):
+        return "gemini"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    return "bm25"
 
 
 # ---------------------------------------------------------------------------
 # Numpy helpers
 # ---------------------------------------------------------------------------
 
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+def cosine_similarity(a: "np.ndarray", b: "np.ndarray") -> float:
     """Cosine similarity between two 1-D float32 arrays."""
+    import numpy as np
     norm_a = np.linalg.norm(a)
     norm_b = np.linalg.norm(b)
     if norm_a == 0 or norm_b == 0:
@@ -372,11 +438,13 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 def vec_to_bytes(vec: List[float]) -> bytes:
     """Serialize a float list to raw float32 bytes for SQLite BLOB storage."""
+    import numpy as np
     return np.array(vec, dtype=np.float32).tobytes()
 
 
-def bytes_to_vec(raw: bytes, dimension: int) -> np.ndarray:
+def bytes_to_vec(raw: bytes, dimension: int) -> "np.ndarray":
     """Deserialize float32 bytes back to a numpy array."""
+    import numpy as np
     arr = np.frombuffer(raw, dtype=np.float32)
     if len(arr) != dimension:
         # Dimension mismatch — return zeros (graceful fallback)

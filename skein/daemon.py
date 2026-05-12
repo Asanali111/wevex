@@ -101,15 +101,21 @@ def ensure_running(*, persist: bool = True, base_url: str = "",
     else:
         _start_nohup(skein_bin)
 
-    # Wait up to 30s for /health.  launchd applies a "minimum runtime" cooldown
-    # after prior failures, so first-boot can take >10 s in pathological cases.
-    deadline = time.time() + 30.0
+    # Poll /health directly every 0.5 s for up to 15 s. The previous loop
+    # routed every iteration through current_status(), which on the unhealthy
+    # path runs `launchctl list` and a PID lookup (~800 ms each). With the
+    # FastAPI lifespan taking 5-10 s on a real boot, most of the supposed 30 s
+    # budget evaporated in subprocess overhead — fast boots fit, slow boots
+    # raced the loop and lost. Direct _check_health probes are sub-ms when the
+    # port is closed and capped at 1.5 s when bound-but-slow, so 15 s of
+    # efficient probes comfortably covers the >10 s "minimum runtime" cooldown
+    # launchd applies after prior failures.
+    deadline = time.time() + 15.0
     while time.time() < deadline:
-        st = current_status(base_url)
-        if st.healthy:
+        if _check_health(base_url):
             _write_cached_backend(backend)
-            return st
-        time.sleep(0.25)
+            return current_status(base_url)
+        time.sleep(0.5)
     return current_status(base_url)
 
 
@@ -576,6 +582,20 @@ def _install_systemd(skein_bin: str) -> None:
 
 
 def _uninstall_systemd(silent: bool = False) -> None:
+    # systemctl only exists on Linux with a user-systemd session. Skipping
+    # cleanly on macOS / Windows / containers without systemd is the right
+    # behavior — `silent=True` callers (e.g. `stop()` on macOS where launchd
+    # is what we actually want to manage) shouldn't crash here.
+    if not shutil.which("systemctl"):
+        if SYSTEMD_UNIT_PATH.exists():
+            # Leftover unit file from a different OS or copied dotfile — drop
+            # it but don't try to talk to systemctl.
+            try:
+                SYSTEMD_UNIT_PATH.unlink()
+            except OSError:
+                if not silent:
+                    raise
+        return
     subprocess.run(
         ["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT_NAME],
         capture_output=True,

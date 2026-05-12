@@ -43,6 +43,25 @@ def test_initialize(client: TestClient) -> None:
     assert result["result"]["serverInfo"]["name"] == "skein"
 
 
+def test_initialize_includes_recall_first_instructions(client: TestClient) -> None:
+    """Q-01: the recall-first guidance is injected via initialize.instructions
+    so every MCP client (Claude Code, Cursor, Codex…) sees it in their
+    system prompt without needing to GET the prompts/recall-first template.
+    """
+    result = mcp(client, "initialize", {
+        "protocolVersion": "2024-11-05",
+        "clientInfo": {"name": "test-client", "version": "0.1"},
+        "capabilities": {},
+    })
+    instructions = result["result"].get("instructions", "")
+    assert instructions, "initialize must return non-empty `instructions`"
+    # The recall-first contract must be enforced
+    assert "recall" in instructions.lower()
+    assert "remember" in instructions.lower()
+    # Negative directive against hallucination
+    assert "do not invent" in instructions.lower() or "don't invent" in instructions.lower()
+
+
 def test_unknown_method(client: TestClient) -> None:
     result = mcp(client, "foo/bar")
     assert "error" in result
@@ -178,6 +197,207 @@ def test_recall_one(client: TestClient) -> None:
     })
     text = r["result"]["content"][0]["text"]
     assert "PostgreSQL" in text
+
+
+def test_supersede_marks_old_stale_and_creates_new(client: TestClient) -> None:
+    """Q-04: supersede atomically marks the old fragment stale and creates
+    a replacement inheriting scope/type/territory/tags."""
+    scope = _seed_scope(client, "project:supersede")
+
+    # Remember an outdated fact
+    mcp(client, "tools/call", {
+        "name": "remember",
+        "arguments": {
+            "content": "use Redis for the session store",
+            "type": "decision",
+            "scope": scope,
+            "tags": ["infra", "session"],
+            "territory": "backend/auth",
+        },
+    })
+    frags = client.get("/v1/fragments", params={"scope": scope}).json()
+    assert frags
+    old_id = frags[0]["id"]
+    old_type = frags[0]["type"]
+    old_tags = frags[0]["tags"]
+    old_territory = frags[0]["territory"]
+
+    # Supersede with new content
+    r = mcp(client, "tools/call", {
+        "name": "supersede",
+        "arguments": {
+            "old_fragment_id": old_id,
+            "new_content": "use Memcached for the session store",
+            "reason": "team voted to switch in iter 13",
+        },
+    })
+    text = r["result"]["content"][0]["text"]
+    assert "Superseded" in text
+
+    # Old fragment must be stale with a pointer to the new one
+    old_after = client.get(f"/v1/fragments/{old_id}").json()
+    assert old_after["is_stale"] is True
+    assert "superseded by" in old_after["stale_reason"]
+    assert "team voted to switch" in old_after["stale_reason"]
+
+    # The new fragment must inherit type / tags / territory
+    all_frags = client.get(
+        "/v1/fragments", params={"scope": scope, "include_stale": "true"}
+    ).json()
+    new_frags = [f for f in all_frags if f["id"] != old_id]
+    assert len(new_frags) == 1
+    new_frag = new_frags[0]
+    assert new_frag["type"] == old_type
+    assert sorted(new_frag["tags"]) == sorted(old_tags)
+    assert new_frag["territory"] == old_territory
+    assert "Memcached" in new_frag["content"]
+    assert new_frag["is_stale"] is False
+
+
+def test_supersede_unknown_fragment(client: TestClient) -> None:
+    r = mcp(client, "tools/call", {
+        "name": "supersede",
+        "arguments": {
+            "old_fragment_id": "does-not-exist",
+            "new_content": "irrelevant",
+        },
+    })
+    text = r["result"]["content"][0]["text"]
+    assert "not found" in text.lower()
+
+
+def test_supersede_refuses_already_stale(client: TestClient) -> None:
+    """If the old fragment is already stale, supersede should refuse and
+    suggest using `remember` directly — chain-superseding clutters history."""
+    scope = _seed_scope(client, "project:supersede-stale")
+    mcp(client, "tools/call", {
+        "name": "remember",
+        "arguments": {
+            "content": "old fact",
+            "type": "fact",
+            "scope": scope,
+        },
+    })
+    frag_id = client.get("/v1/fragments", params={"scope": scope}).json()[0]["id"]
+
+    # Mark stale via REST (soft-delete)
+    client.delete(f"/v1/fragments/{frag_id}")
+
+    r = mcp(client, "tools/call", {
+        "name": "supersede",
+        "arguments": {
+            "old_fragment_id": frag_id,
+            "new_content": "new fact",
+        },
+    })
+    text = r["result"]["content"][0]["text"]
+    assert "already stale" in text.lower()
+
+
+def test_initialize_records_client_name(client: TestClient) -> None:
+    """iter 14.0b: ``initialize`` reads ``clientInfo.name`` and stores it
+    so subsequent tool calls can attribute writes to the originating tool.
+    """
+    mcp(client, "initialize", {
+        "protocolVersion": "2024-11-05",
+        "clientInfo": {"name": "Claude Code", "version": "1.0"},
+        "capabilities": {},
+    })
+    # Verify it's recorded
+    from skein.dependencies import get_storage
+    storage = get_storage()
+    rows = storage.list_mcp_clients()
+    names = {r["client_name"] for r in rows}
+    assert "claude-code" in names  # normalized
+
+
+def test_remember_captures_provenance(client: TestClient) -> None:
+    """iter 14.0c: ``remember`` populates created_by_tool from clientInfo."""
+    mcp(client, "initialize", {
+        "protocolVersion": "2024-11-05",
+        "clientInfo": {"name": "Cursor", "version": "0.40"},
+        "capabilities": {},
+    })
+    scope = _seed_scope(client, "project:prov-test")
+    mcp(client, "tools/call", {
+        "name": "remember",
+        "arguments": {
+            "content": "ProvTest decision",
+            "type": "decision",
+            "scope": scope,
+        },
+    })
+    frags = client.get("/v1/fragments", params={"scope": scope}).json()
+    assert frags
+    f = frags[0]
+    assert f["created_by_tool"] == "cursor"
+    assert f["extraction_method"] == "explicit"
+    assert f["extraction_confidence"] == 1.0
+
+
+def test_supersede_records_supersede_chain(client: TestClient) -> None:
+    """iter 14.0c: ``supersede`` writes both directions of the chain so
+    archaeology can walk forwards and backwards."""
+    scope = _seed_scope(client, "project:chain-test")
+    mcp(client, "tools/call", {
+        "name": "remember",
+        "arguments": {"content": "old fact", "type": "fact", "scope": scope},
+    })
+    old_id = client.get("/v1/fragments", params={"scope": scope}).json()[0]["id"]
+    mcp(client, "tools/call", {
+        "name": "supersede",
+        "arguments": {
+            "old_fragment_id": old_id,
+            "new_content": "new fact",
+        },
+    })
+    # Find the new one
+    all_frags = client.get(
+        "/v1/fragments", params={"scope": scope, "include_stale": "true"}
+    ).json()
+    new_frag = next(f for f in all_frags if f["id"] != old_id)
+    old_frag = next(f for f in all_frags if f["id"] == old_id)
+    # Chain links should be set in both directions
+    assert new_frag["supersedes_fragment_id"] == old_id
+    assert old_frag["superseded_by_fragment_id"] == new_frag["id"]
+
+
+def test_supersede_listed_in_tools(client: TestClient) -> None:
+    result = mcp(client, "tools/list")
+    tools = {t["name"] for t in result["result"]["tools"]}
+    assert "supersede" in tools
+
+
+def test_mcp_recall_emits_event(client: TestClient, tmp_path, monkeypatch) -> None:
+    """R-02: recall/remember/supersede etc. write to the JSONL event log.
+
+    Verifies the integration between the MCP handlers and `events.log_event`.
+    """
+    import json as _json
+    from skein.events import reset_event_logger
+    events_path = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SKEIN_EVENTS_PATH", str(events_path))
+    reset_event_logger()
+    try:
+        scope = _seed_scope(client, "project:events-test")
+        mcp(client, "tools/call", {
+            "name": "remember",
+            "arguments": {"content": "alpha", "type": "fact", "scope": scope},
+        })
+        mcp(client, "tools/call", {
+            "name": "recall",
+            "arguments": {"query": "alpha", "scope": scope},
+        })
+        assert events_path.exists()
+        events = [_json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
+        event_types = {e["event"] for e in events}
+        assert "remember" in event_types
+        assert "recall" in event_types
+        # Recall event records the hits count
+        recall_evt = next(e for e in events if e["event"] == "recall")
+        assert "hits" in recall_evt["details"]
+    finally:
+        reset_event_logger()
 
 
 def test_note_decision(client: TestClient) -> None:

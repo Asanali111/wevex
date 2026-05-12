@@ -156,6 +156,10 @@ async def _dispatch(method: str, params: Dict[str, Any], request: Request) -> An
 
     # ---- Lifecycle ----
     if method == "initialize":
+        # Capture which client is calling, keyed by bearer-token prefix. Lets
+        # every subsequent tool call attribute its writes to the originating
+        # tool without the user managing per-client tokens.
+        _remember_initiating_client(params, request, storage)
         return _handle_initialize(params)
 
     if method == "notifications/initialized":
@@ -202,6 +206,65 @@ async def _dispatch(method: str, params: Dict[str, Any], request: Request) -> An
 # initialize
 # ---------------------------------------------------------------------------
 
+def _normalize_client_name(raw: str) -> str:
+    """Normalize a clientInfo.name into a canonical lowercase-hyphenated form.
+
+    Examples: ``"Claude Code"`` → ``"claude-code"``, ``"Cursor"`` → ``"cursor"``,
+    ``"Gemini CLI"`` → ``"gemini-cli"``, ``""`` → ``"unknown"``.
+    """
+    if not raw or not isinstance(raw, str):
+        return "unknown"
+    s = raw.strip().lower()
+    # Collapse runs of whitespace/dots/underscores into single hyphens
+    out_chars = []
+    last_dash = False
+    for ch in s:
+        if ch.isalnum():
+            out_chars.append(ch)
+            last_dash = False
+        elif not last_dash:
+            out_chars.append("-")
+            last_dash = True
+    result = "".join(out_chars).strip("-")
+    return result or "unknown"
+
+
+def _remember_initiating_client(params: Dict[str, Any], request: Request, storage: Any) -> None:
+    """Record the (token_prefix, client_name) pairing for this connection.
+
+    Reads ``params.clientInfo.name`` per MCP spec; falls back to ``"unknown"``
+    if the client didn't introduce itself.
+    """
+    try:
+        from .auth import token_prefix as _prefix
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.removeprefix("Bearer ").strip() if auth_header else ""
+        if not token:
+            return
+        prefix = _prefix(token)
+        client_info = params.get("clientInfo") or {}
+        name = _normalize_client_name(client_info.get("name", ""))
+        display = client_info.get("name") if client_info else None
+        storage.upsert_mcp_client(prefix, name, display_name=display)
+    except Exception:
+        # Never let a logging-style helper break the initialize handshake.
+        logger.debug("failed to record client for token", exc_info=True)
+
+
+def _client_name_for_request(request: Request, storage: Any) -> str:
+    """Best-effort lookup of which LLM client this request came from."""
+    try:
+        from .auth import token_prefix as _prefix
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.removeprefix("Bearer ").strip() if auth_header else ""
+        if not token:
+            return "unknown"
+        prefix = _prefix(token)
+        return storage.get_client_for_token_prefix(prefix) or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def _handle_initialize(params: Dict) -> Dict:
     return {
         "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -211,6 +274,11 @@ def _handle_initialize(params: Dict) -> Dict:
             "resources": {"listChanged": False, "subscribe": False},
             "prompts": {"listChanged": False},
         },
+        # Per MCP spec, `instructions` is server-supplied text the client
+        # SHOULD include in its system prompt. We use it to auto-inject the
+        # recall-first guidance — avoids the AI consumer needing to be told
+        # by the user/AGENTS.md to call `recall` first on every turn.
+        "instructions": _RECALL_FIRST_TEXT,
     }
 
 
@@ -341,6 +409,35 @@ _TOOLS = [
         },
     },
     {
+        "name": "supersede",
+        "description": (
+            "Replace an outdated fragment with new content in one atomic call. "
+            "Marks the old fragment stale (with reason 'superseded by <new_id>') "
+            "and creates a new fragment inheriting the old one's scope, type, "
+            "territory, and tags. Use this when you realize a previously-stored "
+            "decision/fact/state is no longer correct — e.g. an old `decision` "
+            "fragment that says 'use Redis' when the team has since switched to "
+            "Memcached. The new fragment ID is returned and recall() will prefer "
+            "it over the now-stale one."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "old_fragment_id": {"type": "string", "description": "ID of the fragment to supersede"},
+                "new_content": {"type": "string", "description": "Replacement content"},
+                "reason": {"type": "string", "description": "Optional note explaining why the old fragment is outdated"},
+                "type": {
+                    "type": "string",
+                    "enum": ["preference", "fact", "decision", "state",
+                             "observation", "requirement", "procedure", "conversation"],
+                    "description": "Override the type — defaults to the old fragment's type.",
+                },
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Override tags — defaults to the old fragment's tags."},
+            },
+            "required": ["old_fragment_id", "new_content"],
+        },
+    },
+    {
         "name": "search_code",
         "description": (
             "Search the project's indexed codebase / documents for relevant chunks. "
@@ -370,6 +467,35 @@ _TOOLS = [
         },
     },
 ]
+
+
+_GIT_HEAD_CACHE: Dict[str, tuple] = {}  # cwd → (commit_hash, expires_at)
+
+
+def _resolve_git_head() -> Optional[str]:
+    """Cheap, cached lookup of ``git rev-parse HEAD`` for the daemon's cwd.
+
+    Cached for 30s — fast enough for high-frequency MCP calls without going
+    stale during long sessions. Returns None on any error (no git, no repo,
+    binary not found).
+    """
+    import os
+    import subprocess
+    import time as _time
+    cwd = os.getcwd()
+    entry = _GIT_HEAD_CACHE.get(cwd)
+    if entry and entry[1] > _time.time():
+        return entry[0]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd, capture_output=True, text=True, timeout=1.0,
+        )
+        sha = result.stdout.strip() if result.returncode == 0 else None
+    except Exception:
+        sha = None
+    _GIT_HEAD_CACHE[cwd] = (sha, _time.time() + 30.0)
+    return sha
 
 
 def _auto_scope() -> str:
@@ -423,6 +549,16 @@ async def _call_tool(
     # precedence as the CLI (.skein/scope > SKEIN_SCOPE > config default).
     args.setdefault("scope", _auto_scope())
 
+    # Provenance (iter 14.0): which LLM client is calling? Looked up by
+    # token-prefix, populated in `initialize`. Tools may optionally pass
+    # `session_id` and `files_open` in their args for richer provenance.
+    client_name = _client_name_for_request(request, storage)
+    session_id = args.pop("session_id", None) if "session_id" in args else None
+    files_open = args.pop("files_open", None) if "files_open" in args else None
+    if not isinstance(files_open, list):
+        files_open = []
+    git_head = _resolve_git_head()
+
     def _ensure_scope(scope_handle: str):
         """Get-or-create the scope so first-time agents don't fail."""
         s = storage.get_scope(scope_handle)
@@ -438,6 +574,7 @@ async def _call_tool(
 
     # ---- recall ----
     if name == "recall":
+        from .events import log_event
         req = RecallRequest(
             query=args["query"],
             scope=args["scope"],
@@ -446,6 +583,7 @@ async def _call_tool(
             limit=args.get("limit", 10),
         )
         response = do_recall(req, storage, provider)
+        log_event("recall", scope=args["scope"], query=args["query"][:120], hits=response.total)
         if not response.results:
             return _tool_text("No relevant context found.")
         lines = [f"Found {response.total} fragments for query: {response.query!r}\n"]
@@ -484,6 +622,12 @@ async def _call_tool(
             territory=args.get("territory"),
             tags=args.get("tags", []),
             ttl_seconds=args.get("ttl_seconds"),
+            created_by_tool=client_name,
+            created_in_session_id=session_id,
+            created_against_commit=git_head,
+            files_open_at_creation=files_open,
+            extraction_method="explicit",
+            extraction_confidence=1.0,
         )
 
         from .embeddings import vec_to_bytes
@@ -503,6 +647,11 @@ async def _call_tool(
         storage._conn.execute(
             "UPDATE commits SET fragments_added = ? WHERE id = ?",
             (f'["{frag.id}"]', commit.id),
+        )
+        from .events import log_event
+        log_event(
+            "remember", scope=args["scope"], fragment_id=frag.id,
+            type=frag.type, preview=args["content"][:80],
         )
         return _tool_text(f"Stored fragment {frag.id[:8]}… (type={frag.type})")
 
@@ -535,11 +684,22 @@ async def _call_tool(
             scope_id=scope.id, owner_id=owner_id,
             territory=args.get("territory"),
             tags=args.get("tags", []),
+            created_by_tool=client_name,
+            created_in_session_id=session_id,
+            created_against_commit=git_head,
+            files_open_at_creation=files_open,
+            extraction_method="explicit",
+            extraction_confidence=1.0,
         )
         frag = storage.create_fragment(data, commit_id=commit.id, embedding=embedding_bytes)
         storage._conn.execute(
             "UPDATE commits SET fragments_added = ? WHERE id = ?",
             (f'["{frag.id}"]', commit.id),
+        )
+        from .events import log_event
+        log_event(
+            "note_decision", scope=args["scope"], fragment_id=frag.id,
+            preview=args["content"][:80],
         )
         return _tool_text(f"Decision recorded: {frag.id[:8]}…")
 
@@ -561,6 +721,11 @@ async def _call_tool(
             reason=args.get("reason"),
         )
         lease = storage.acquire_lease(data)
+        from .events import log_event
+        log_event(
+            "claim_lease", scope=args["scope"], lease_id=lease.id,
+            glob=lease.glob, expires_at=lease.expires_at,
+        )
         return _tool_text(
             f"Lease acquired: {lease.id[:8]}… on '{lease.glob}' "
             f"(expires {lease.expires_at})"
@@ -570,8 +735,93 @@ async def _call_tool(
     if name == "release_lease":
         released = storage.release_lease(args["lease_id"], owner_id)
         if released:
+            from .events import log_event
+            log_event("release_lease", lease_id=args["lease_id"])
             return _tool_text(f"Lease {args['lease_id'][:8]}… released.")
         return _tool_text("Lease not found or not owned by you.")
+
+    # ---- supersede ----
+    if name == "supersede":
+        from .embeddings import vec_to_bytes
+        from .models import CommitCreate, FragmentUpdate
+
+        old_id = args["old_fragment_id"]
+        old = storage.get_fragment(old_id)
+        if not old:
+            return _tool_text(f"Fragment {old_id} not found — nothing to supersede.")
+        if old.is_stale:
+            return _tool_text(
+                f"Fragment {old_id[:8]}… is already stale "
+                f"(reason: {old.stale_reason or 'unknown'}). "
+                "Use `remember` to add a new fragment instead."
+            )
+
+        # Inherit scope/type/territory/tags unless overridden
+        new_type = args.get("type") or old.type
+        new_tags = args.get("tags") if args.get("tags") is not None else list(old.tags)
+        new_content = args["new_content"]
+
+        embedding_bytes = None
+        try:
+            vec = provider.embed_one(new_content)
+            embedding_bytes = vec_to_bytes(vec)
+        except Exception:
+            pass
+
+        commit = storage.create_commit(CommitCreate(
+            author_id=owner_id, scope_id=old.scope_id,
+            message=f"[mcp] supersede {old_id[:8]}…: {new_content[:60]}",
+        ))
+        new_frag = storage.create_fragment(
+            FragmentCreate(
+                content=new_content, type=new_type,
+                scope_id=old.scope_id, owner_id=owner_id,
+                territory=old.territory, tags=new_tags,
+                created_by_tool=client_name,
+                created_in_session_id=session_id,
+                created_against_commit=git_head,
+                files_open_at_creation=files_open,
+                supersedes_fragment_id=old.id,
+                extraction_method="explicit",
+                extraction_confidence=1.0,
+            ),
+            commit_id=commit.id, embedding=embedding_bytes,
+        )
+
+        # Now mark the old fragment stale, referencing the replacement.
+        stale_reason = f"superseded by {new_frag.id}"
+        if args.get("reason"):
+            stale_reason += f" — {args['reason']}"
+        try:
+            storage.update_fragment(old_id, FragmentUpdate(
+                is_stale=True,
+                stale_reason=stale_reason,
+                expected_version=old.version,
+            ))
+        except ConflictError:
+            # Someone else modified the old fragment between our read and
+            # write. The new fragment is already created — surface this so
+            # the caller knows the old one wasn't actually marked stale.
+            return _tool_text(
+                f"New fragment {new_frag.id[:8]}… created, but the old "
+                f"fragment {old_id[:8]}… was modified concurrently and "
+                "could not be marked stale. Retry with `mark_stale` if needed."
+            )
+
+        storage._conn.execute(
+            "UPDATE commits SET fragments_added = ? WHERE id = ?",
+            (f'["{new_frag.id}"]', commit.id),
+        )
+        from .events import log_event
+        log_event(
+            "supersede", scope=args["scope"],
+            old_fragment_id=old_id, new_fragment_id=new_frag.id,
+            preview=new_content[:80],
+        )
+        return _tool_text(
+            f"Superseded {old_id[:8]}… → {new_frag.id[:8]}… "
+            f"(type={new_type})"
+        )
 
     # ---- search_code ----
     if name == "search_code":

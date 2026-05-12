@@ -204,3 +204,39 @@ class TestEnsureRunning:
         s = ensure_running(persist=False, base_url="http://127.0.0.1:8765")
         assert s.healthy is True
         assert called == []  # short-circuited
+
+
+class TestRestartWaitsForSlowDaemon:
+    """The FastAPI lifespan takes 5-10s on a real boot. The readiness poll in
+    ensure_running() must stay patient enough to catch the daemon when it
+    flips healthy mid-window, not declare failure after a few quick probes."""
+
+    def test_restart_succeeds_when_health_flips_after_delay(
+        self, isolated_home, monkeypatch
+    ):
+        # Simulate a daemon that takes ~5 s to come up: /health returns False
+        # for the first 10 polls, then True. With the 0.5 s poll interval that
+        # mirrors the production failure mode the user hit.
+        probe_count = {"n": 0}
+        flip_at = 10
+
+        def fake_check_health(*args, **kwargs):
+            probe_count["n"] += 1
+            return probe_count["n"] > flip_at
+
+        monkeypatch.setattr(daemon_mod, "_check_health", fake_check_health)
+        monkeypatch.setattr(daemon_mod, "_resolve_skein_bin",
+                            lambda: "/usr/local/bin/skein")
+        monkeypatch.setattr(daemon_mod, "_install_launchd", lambda *a, **k: None)
+        monkeypatch.setattr(daemon_mod, "_install_systemd", lambda *a, **k: None)
+        monkeypatch.setattr(daemon_mod, "_start_nohup", lambda *a, **k: None)
+        # nohup backend keeps the test cross-platform; persist=False forces it.
+        s = daemon_mod.restart(persist=False, base_url="http://127.0.0.1:8765")
+
+        assert s.healthy is True, (
+            f"restart should have waited for the slow daemon, "
+            f"but returned healthy=False after {probe_count['n']} probes"
+        )
+        # Proves the loop actually iterated rather than getting lucky on a
+        # cached True — a regression that shortens the poll would trip here.
+        assert probe_count["n"] > flip_at

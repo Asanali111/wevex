@@ -1,0 +1,9 @@
+{
+  "src/auth.py": "def authenticate(user, password):\n    \"\"\"Validate a user's credentials against the auth backend.\"\"\"\n    return user.password_hash == hash_password(password)\n\n\ndef issue_jwt(user, scopes):\n    \"\"\"Mint a 15-minute access token plus a 30-day refresh token.\"\"\"\n    return mint_token(user.id, scopes, ttl_seconds=900)\n",
+  "src/cache.py": "import redis\n\n_pool = redis.ConnectionPool(host='cache', port=6379)\n\n\ndef session_cache():\n    \"\"\"Return a Redis client used for session storage.\"\"\"\n    return redis.Redis(connection_pool=_pool)\n",
+  "src/payments.py": "import stripe\n\n\ndef charge_invoice(invoice_id, amount):\n    \"\"\"Charge a customer via Stripe and return the charge id.\"\"\"\n    return stripe.Charge.create(amount=amount, source=invoice_id)\n",
+  "src/rate_limit.py": "from collections import defaultdict\n\n_RATE = 1000  # requests per minute per user\n\n\ndef allow(user_id, now):\n    \"\"\"Return True if the user is below the per-minute rate limit.\"\"\"\n    bucket = _bucket_for(user_id, now)\n    return bucket.consume()\n",
+  "src/storage_s3.py": "import boto3\n\n_s3 = boto3.client('s3')\n\n\ndef upload(blob, key):\n    \"\"\"Upload a user file to the S3 bucket behind CloudFront.\"\"\"\n    _s3.put_object(Bucket='user-uploads', Key=key, Body=blob)\n",
+  "tests/test_auth.py": "def test_authenticate_accepts_correct_password():\n    user = build_user(password='secret')\n    assert authenticate(user, 'secret')\n\n\ndef test_jwt_lifetime():\n    tok = issue_jwt(user, scopes=['read'])\n    assert tok.exp - tok.iat == 900\n",
+  "docs/architecture.md": "# Architecture\n\nThe API uses FastAPI behind a Redis-backed session cache.\nPostgreSQL is the primary datastore; uploads go to S3 with a CloudFront CDN.\n"
+}

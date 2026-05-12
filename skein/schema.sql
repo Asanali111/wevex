@@ -89,6 +89,16 @@ CREATE TABLE IF NOT EXISTS fragments (
   source_commit_id TEXT REFERENCES commits(id),
   metadata         TEXT NOT NULL DEFAULT '{}',
   content_embedding BLOB,                        -- NULL until embedded
+  -- Provenance (iter 14.0) — every fragment carries the full origin story
+  -- so `skein archaeology` can reconstruct decisions even years later.
+  created_by_tool          TEXT,                 -- claude-code, cursor, codex, code-scanner, transcript-claude, …
+  created_in_session_id    TEXT,                 -- session UUID from the originating client
+  created_against_commit   TEXT,                 -- git rev-parse HEAD at creation time
+  files_open_at_creation   TEXT NOT NULL DEFAULT '[]',  -- JSON array
+  supersedes_fragment_id   TEXT REFERENCES fragments(id),
+  superseded_by_fragment_id TEXT REFERENCES fragments(id),
+  extraction_method        TEXT NOT NULL DEFAULT 'explicit',  -- explicit | code-scan | transcript-claude | …
+  extraction_confidence    REAL,                 -- 1.0 for explicit; <1.0 for auto-extracted
   created_at       TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -98,6 +108,10 @@ CREATE INDEX IF NOT EXISTS idx_fragments_type     ON fragments(type);
 CREATE INDEX IF NOT EXISTS idx_fragments_expires  ON fragments(expires_at) WHERE expires_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_fragments_stale    ON fragments(is_stale);
 CREATE INDEX IF NOT EXISTS idx_fragments_territory ON fragments(territory) WHERE territory IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_fragments_supersedes ON fragments(supersedes_fragment_id) WHERE supersedes_fragment_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_fragments_superseded_by ON fragments(superseded_by_fragment_id) WHERE superseded_by_fragment_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_fragments_tool     ON fragments(created_by_tool) WHERE created_by_tool IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_fragments_method   ON fragments(extraction_method);
 
 -- FTS5 virtual table for full-text (BM25-like) search
 CREATE VIRTUAL TABLE IF NOT EXISTS fragments_fts
@@ -211,3 +225,67 @@ CREATE TRIGGER IF NOT EXISTS chunks_fts_update
     DELETE FROM chunks_fts WHERE chunk_id = old.id;
     INSERT INTO chunks_fts(content, chunk_id) VALUES (new.content, new.id);
   END;
+
+
+-- ---------------------------------------------------------------------------
+-- MCP client tokens (iter 14.0)
+-- One row per LLM client connected to Skein. `skein up` populates this so
+-- every MCP request can be attributed to the originating tool
+-- (claude-code / cursor / codex / …).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS mcp_clients (
+  token_prefix     TEXT PRIMARY KEY,           -- first 16 chars of bearer token (unique enough)
+  client_name      TEXT NOT NULL,              -- canonical lowercase: claude-code, cursor, codex, ...
+  display_name     TEXT,                       -- user-facing label
+  full_token_hash  TEXT,                       -- optional: bcrypt for full verification later
+  created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_clients_name ON mcp_clients(client_name);
+
+-- ---------------------------------------------------------------------------
+-- Extraction candidates (iter 14.2)
+-- Pending fragments produced by the passive watchers (code scanner +
+-- transcript extractor). Medium-confidence candidates land here for
+-- `skein inbox` review before being promoted to real fragments.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS extraction_candidates (
+  id                  TEXT PRIMARY KEY,
+  scope_id            TEXT NOT NULL REFERENCES scopes(id) ON DELETE CASCADE,
+  content             TEXT NOT NULL,
+  type                TEXT NOT NULL CHECK (type IN (
+                        'preference','fact','decision','state',
+                        'observation','requirement','procedure','conversation')),
+  territory           TEXT,
+  tags                TEXT NOT NULL DEFAULT '[]',     -- JSON array
+  confidence          REAL NOT NULL,
+  source_tool         TEXT NOT NULL,                  -- code-scanner / transcript-claude / ...
+  source_session_id   TEXT,
+  source_file         TEXT,                           -- when extracted from a file
+  source_message_ts   TEXT,                           -- when extracted from a chat message
+  status              TEXT NOT NULL DEFAULT 'pending',-- pending | approved | rejected
+  reviewed_at         TEXT,
+  promoted_fragment_id TEXT REFERENCES fragments(id), -- non-null after approval
+  created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidates_status ON extraction_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_candidates_scope ON extraction_candidates(scope_id);
+CREATE INDEX IF NOT EXISTS idx_candidates_tool ON extraction_candidates(source_tool);
+
+-- Dedupe: same content + scope + source_file shouldn't pile up
+CREATE UNIQUE INDEX IF NOT EXISTS uq_candidates_dedup
+  ON extraction_candidates(scope_id, content, source_tool);
+
+-- ---------------------------------------------------------------------------
+-- Transcript cursors (iter 14.2)
+-- Track how far into each Claude Code transcript JSONL we've read, so the
+-- watcher can resume cleanly after daemon restart without re-extracting
+-- everything.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS transcript_cursors (
+  file_path        TEXT PRIMARY KEY,
+  last_byte_offset INTEGER NOT NULL DEFAULT 0,
+  last_seen_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  client_name      TEXT NOT NULL                  -- claude-code, ...
+);

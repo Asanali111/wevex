@@ -1,0 +1,22 @@
+[
+  {"id": "c01", "subject": "feat(auth): add OAuth2 PKCE flow for mobile clients", "body": "Replaces password-grant. Requires kid header on JWT to support key rotation.", "is_real_decision": true},
+  {"id": "c02", "subject": "fix(billing): correct proration when downgrading mid-cycle", "body": "Previously refunded the full month; now prorates from change date.", "is_real_decision": true},
+  {"id": "c03", "subject": "refactor(storage): split fragments table out of monolithic schema", "body": "Cleaner FK ownership; required for the upcoming scope-hierarchy migration.", "is_real_decision": true},
+  {"id": "c04", "subject": "perf(retrieval): switch BM25 lookup to fts5 contentless table", "body": "Cuts query latency from 18ms to 3ms on the production corpus.", "is_real_decision": true},
+  {"id": "c05", "subject": "feat(rag): chunk markdown by heading instead of fixed line windows", "body": "Better semantic boundaries; ingest is slightly slower but recall@5 up 12 points.", "is_real_decision": true},
+  {"id": "c06", "subject": "fix(scope): honor .skein/scope pin in `recall` CLI subcommand", "body": "Previously fell back to default_scope when run from a pinned project.", "is_real_decision": true},
+  {"id": "c07", "subject": "chore: bump dependencies", "body": "", "is_real_decision": false},
+  {"id": "c08", "subject": "chore(deps): bump httpx to 0.27.2", "body": "", "is_real_decision": false},
+  {"id": "c09", "subject": "style: run black + isort across the package", "body": "", "is_real_decision": false},
+  {"id": "c10", "subject": "Merge branch 'main' into feature/git-watcher", "body": "", "is_real_decision": false},
+  {"id": "c11", "subject": "Merge pull request #42 from acme/feat-leases", "body": "", "is_real_decision": false},
+  {"id": "c12", "subject": "bump version to 0.2.0", "body": "", "is_real_decision": false},
+  {"id": "c13", "subject": "wip: experimenting with sqlite-vec", "body": "Don't merge.", "is_real_decision": false},
+  {"id": "c14", "subject": "fixup! refactor(storage): split fragments table", "body": "", "is_real_decision": false},
+  {"id": "c15", "subject": "Update README", "body": "", "is_real_decision": false},
+  {"id": "c16", "subject": "revert \"feat(auth): add OAuth2 PKCE flow\"", "body": "Reverting to investigate token-rotation race.", "is_real_decision": false},
+  {"id": "c17", "subject": "docs(architecture): document the lease coordination model", "body": "ADR-0007. Explains why we picked advisory leases over CRDTs.", "is_real_decision": true},
+  {"id": "c18", "subject": "feat: add `skein doctor --perf` self-measurement", "body": "Runs the bench suite against the live daemon and prints p50/p95.", "is_real_decision": true},
+  {"id": "c19", "subject": "test(retrieval): add hit@5 fixtures for hybrid RRF", "body": "", "is_real_decision": false},
+  {"id": "c20", "subject": "Initial commit", "body": "", "is_real_decision": false}
+]

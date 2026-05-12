@@ -131,8 +131,22 @@ class ClaudeCodeClient(BaseClient):
         if not shutil.which("claude"):
             raise RuntimeError("claude binary not found in PATH")
         env = os.environ.copy()
+        # If an old (header-less) entry exists, remove it first so the add
+        # below doesn't no-op into the broken state. Idempotent.
+        subprocess.run(
+            ["claude", "mcp", "remove", "skein"],
+            capture_output=True, text=True, timeout=15, env=env,
+        )
+        # Iter 16 fix: pass the bearer token via --header so Claude Code's
+        # MCP client can authenticate against /mcp. Without this the entry
+        # registers but every initialize returns 401 — exactly the "Failed
+        # to connect" the user was seeing in `claude mcp list`.
         out = subprocess.run(
-            ["claude", "mcp", "add", "skein", mcp_url, "--transport", "http"],
+            [
+                "claude", "mcp", "add", "skein", mcp_url,
+                "--transport", "http",
+                "--header", f"Authorization: Bearer {bearer_token}",
+            ],
             capture_output=True, text=True, timeout=15, env=env,
         )
         if out.returncode != 0:
