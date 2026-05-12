@@ -27,6 +27,10 @@ _archive_v2/frontend/node_modules/
 
 # Local tool configs (may contain tokens)
 .codex/
+.claude/settings.local.json
+
+# Session handoff notes (per-machine transcripts; may quote dead tokens)
+HANDOFF.md
 
 # Skein local data (daemon DB + per-project state during dev)
 .skein/
