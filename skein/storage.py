@@ -600,6 +600,32 @@ class Storage:
             (scope_id,),
         ).fetchone()[0]
 
+    def count_fragments_by_type(
+        self, scope_id: str, include_stale: bool = False,
+    ) -> Dict[str, int]:
+        """Return ``{type: count}`` for a scope in a single SQL round-trip.
+
+        Powers the `project_briefing` MCP tool / `/v1/briefing` endpoint.
+        Default ``include_stale=False`` mirrors :py:meth:`count_fragments`.
+        Types absent from the result simply don't appear in the dict — callers
+        should default to 0 for any type they care about.
+        """
+        if include_stale:
+            rows = self._conn.execute(
+                "SELECT type, COUNT(*) AS c FROM fragments WHERE scope_id = ? "
+                "GROUP BY type",
+                (scope_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT type, COUNT(*) AS c FROM fragments WHERE scope_id = ? "
+                "AND is_stale = 0 "
+                "AND (expires_at IS NULL OR expires_at > datetime('now')) "
+                "GROUP BY type",
+                (scope_id,),
+            ).fetchall()
+        return {row["type"]: int(row["c"]) for row in rows}
+
     def get_fragment_embedding(self, frag_id: str) -> Optional[bytes]:
         row = self._conn.execute(
             "SELECT content_embedding FROM fragments WHERE id = ?", (frag_id,)

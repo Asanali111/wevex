@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -26,6 +27,7 @@ from .dependencies import set_provider, set_storage
 from .embeddings import get_provider
 from .mcp import router as mcp_router
 from .models import HealthResponse
+from .routers.briefing import router as briefing_router
 from .routers.chunks import router as chunks_router
 from .routers.commits import router as commits_router
 from .routers.fragments import router as fragments_router
@@ -37,8 +39,23 @@ from .storage import Storage
 logger = logging.getLogger("skein.server")
 
 
+# ---------------------------------------------------------------------------
+# Daemon uptime tracker (set in lifespan, read by /v1/briefing + MCP briefing)
+# ---------------------------------------------------------------------------
+_DAEMON_STARTED_AT: Optional[float] = None
+
+
+def get_daemon_uptime_seconds() -> int:
+    """Seconds since the daemon entered its lifespan. 0 if not started yet."""
+    if _DAEMON_STARTED_AT is None:
+        return 0
+    return int(time.time() - _DAEMON_STARTED_AT)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _DAEMON_STARTED_AT
+    _DAEMON_STARTED_AT = time.time()
     cfg: SkeinConfig = app.state.cfg  # type: ignore[attr-defined]
 
     # Initialise storage
@@ -159,6 +176,7 @@ def create_app(cfg: Optional[SkeinConfig] = None) -> FastAPI:
     app.include_router(commits_router)
     app.include_router(leases_router)
     app.include_router(chunks_router)
+    app.include_router(briefing_router)
     app.include_router(mcp_router)
 
     @app.get("/health", response_model=HealthResponse, tags=["meta"])

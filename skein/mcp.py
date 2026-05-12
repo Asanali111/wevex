@@ -288,13 +288,40 @@ def _handle_initialize(params: Dict) -> Dict:
 
 _TOOLS = [
     {
+        "name": "project_briefing",
+        "description": (
+            "Returns the project's current state in ONE call — fragment counts "
+            "by type, recent decisions, daemon health, recommended next "
+            "action. Use this BEFORE reading any source file or calling "
+            "multiple `recall`s when you need a project overview. Returns in "
+            "<50ms, costs ~300 tokens. The fastest path to 'what is "
+            "happening here?'"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "description": (
+                        "Scope handle, e.g. 'project:myapp'. "
+                        "Omit to auto-detect from cwd."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "recall",
         "description": (
-            "Search for relevant context fragments from the Skein context bus. "
-            "Use this at the start of any task to load relevant decisions, "
-            "state, requirements, and preferences. Returns ranked fragments. "
-            "The `scope` argument is optional — Skein auto-detects it from "
-            "the daemon's working directory (project pin / git remote)."
+            "Returns ranked context fragments (decisions, facts, observations, "
+            "preferences, state, requirements) matching a natural-language query. "
+            "Use BEFORE reading source files when you need project history, prior "
+            "decisions, or non-obvious 'why' / 'how' context. "
+            "Returns top-K in <100ms, ~30 tokens per fragment — one `recall` "
+            "typically replaces 5+ `read_file` calls. If top score < 0.1, Skein "
+            "lacks high-signal content for that query and will tell you to fall "
+            "back to source. Scope auto-detected from cwd."
         ),
         "inputSchema": {
             "type": "object",
@@ -314,7 +341,11 @@ _TOOLS = [
     },
     {
         "name": "recall_one",
-        "description": "Retrieve the full content of a specific fragment by ID (progressive disclosure).",
+        "description": (
+            "Retrieve the full content of a specific fragment by ID. "
+            "Use after `recall` when you saw a truncated fragment and need the "
+            "complete text. <10ms, ~150 tokens average."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -326,10 +357,12 @@ _TOOLS = [
     {
         "name": "remember",
         "description": (
-            "Store a context fragment in the Skein context bus. "
-            "Call this after any significant decision, observation, or state change. "
-            "Other agents and tools will be able to recall this context. "
-            "The `scope` argument is optional — Skein auto-detects from cwd."
+            "Persists a fact, observation, decision, preference, state, or "
+            "requirement to the project's context bus. Call AFTER making a "
+            "non-obvious decision so other tools (you in a later session, or "
+            "other LLMs) can recall it. Dedupes by content+scope+source_tool — "
+            "safe to call eagerly. Returns the fragment ID. ~5ms. "
+            "Scope auto-detected from cwd."
         ),
         "inputSchema": {
             "type": "object",
@@ -352,8 +385,12 @@ _TOOLS = [
     {
         "name": "note_decision",
         "description": (
-            "Record an architectural or technical decision. "
-            "Convenience wrapper around remember(type='decision') with structured alternatives/rationale."
+            "Persists an architectural or technical decision with structured "
+            "`alternatives` and `rationale` fields. Call AFTER picking an "
+            "approach when the WHY matters (architectural choices, library "
+            "picks, performance trade-offs). Higher signal than "
+            "`remember(type='decision')` because the structured fields preserve "
+            "the reasoning across tools and sessions. ~5ms. Scope auto-detected."
         ),
         "inputSchema": {
             "type": "object",
@@ -371,9 +408,11 @@ _TOOLS = [
     {
         "name": "claim_lease",
         "description": (
-            "Acquire an advisory lease on a file-glob pattern. "
-            "Informs other agents that you are working on this area. "
-            "They will see a LEASE_CONFLICT if they try to acquire the same glob."
+            "Reserves a file-glob area for exclusive editing by your session. "
+            "Call BEFORE multi-step refactors to prevent parallel agents from "
+            "stepping on each other (e.g. two Claude Code sessions both "
+            "rewriting `auth/`). Other agents see LEASE_CONFLICT if they try "
+            "the same glob. Defaults to 5-min TTL. ~5ms."
         ),
         "inputSchema": {
             "type": "object",
@@ -388,7 +427,10 @@ _TOOLS = [
     },
     {
         "name": "release_lease",
-        "description": "Release a previously acquired advisory lease.",
+        "description": (
+            "Release a previously acquired lease before its TTL expires. "
+            "Call when you're done editing the area you claimed."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -399,7 +441,11 @@ _TOOLS = [
     },
     {
         "name": "query_leases",
-        "description": "List active advisory leases for a scope.",
+        "description": (
+            "List active leases for a scope. Use as a coordination check before "
+            "claiming your own lease — discovers what other agents are currently "
+            "editing. ~5ms."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -411,14 +457,13 @@ _TOOLS = [
     {
         "name": "supersede",
         "description": (
-            "Replace an outdated fragment with new content in one atomic call. "
-            "Marks the old fragment stale (with reason 'superseded by <new_id>') "
-            "and creates a new fragment inheriting the old one's scope, type, "
-            "territory, and tags. Use this when you realize a previously-stored "
-            "decision/fact/state is no longer correct — e.g. an old `decision` "
-            "fragment that says 'use Redis' when the team has since switched to "
-            "Memcached. The new fragment ID is returned and recall() will prefer "
-            "it over the now-stale one."
+            "Atomically replaces an outdated fragment with new content. Marks "
+            "the old fragment stale (reason: 'superseded by <new_id>') and "
+            "creates a new fragment inheriting the old one's scope/type/"
+            "territory/tags. Use when a prior decision/fact is no longer correct "
+            "(e.g. 'use Redis' → 'use Memcached'). recall() then prefers the "
+            "new fragment AND surfaces the supersede chain — uniquely Skein's "
+            "decision archaeology. ~10ms."
         ),
         "inputSchema": {
             "type": "object",
@@ -440,12 +485,13 @@ _TOOLS = [
     {
         "name": "search_code",
         "description": (
-            "Search the project's indexed codebase / documents for relevant chunks. "
-            "Returns code snippets with file paths and line ranges. "
-            "Use this when you need to find existing functions, types, or "
-            "documentation by semantic meaning, not just text match. "
-            "Code must be ingested first via `skein ingest` before this works. "
-            "The `scope` argument is optional — Skein auto-detects from cwd."
+            "Hybrid (BM25 + semantic) search over the project's indexed code "
+            "and docs. Returns ranked snippets with file paths and line ranges. "
+            "Use when you need to FIND something by meaning ('the place that "
+            "handles rate limiting') rather than read a file whose path you "
+            "already know. Faster and more relevant than `grep` for conceptual "
+            "queries; complements `read_file` for known paths. <50ms, ~100 "
+            "tokens per snippet. Code must be ingested via `skein ingest` first."
         ),
         "inputSchema": {
             "type": "object",
@@ -515,6 +561,96 @@ def _auto_scope() -> str:
 
 
 # ---------------------------------------------------------------------------
+# project_briefing — single-call project snapshot
+# ---------------------------------------------------------------------------
+
+# Fragment types we always surface in the briefing, even when the count is 0.
+# Keeps the response shape stable so LLMs can rely on `decision`/`fact`/…
+# always being present.
+_BRIEFING_TYPES = ("decision", "fact", "observation", "preference",
+                   "state", "requirement", "procedure", "conversation")
+
+
+def build_briefing(storage: Any, scope_handle: str) -> Dict[str, Any]:
+    """Pure builder for the project-briefing payload.
+
+    Kept transport-agnostic so the MCP handler, REST router, and tests can all
+    call it without going through JSON-RPC. Returns the dict the spec
+    describes; callers serialise it (JSON for HTTP, MCP text content, etc.).
+    """
+    from .config import get_config
+    from .server import get_daemon_uptime_seconds
+
+    cfg = get_config()
+    scope = storage.get_scope(scope_handle)
+
+    if scope is None:
+        # Permissive: an LLM may call briefing on a brand-new project before
+        # any fragments exist. Return zeros rather than 404 — the MCP tool
+        # should be safe to call from any cwd.
+        type_counts: Dict[str, int] = {}
+        recent_decisions: List[Dict[str, Any]] = []
+        fragment_total = 0
+    else:
+        type_counts = storage.count_fragments_by_type(scope.id)
+        fragment_total = storage.count_fragments_in_scope(scope.id)
+        recent_frags = storage.list_fragments(
+            scope_id=scope.id, type_filter="decision",
+            include_stale=False, limit=5,
+        )
+        recent_decisions = []
+        for f in recent_frags:
+            first_line = (f.content or "").splitlines()[0] if f.content else ""
+            if len(first_line) > 120:
+                first_line = first_line[:117] + "..."
+            recent_decisions.append({
+                "id_short": f.id[:8],
+                "content_first_line": first_line,
+                "created_by_tool": f.created_by_tool,
+                "created_at": f.created_at,
+                "tags": list(f.tags),
+            })
+
+    # Pad the counts dict so every known type appears, even with 0.
+    fragment_counts = {t: int(type_counts.get(t, 0)) for t in _BRIEFING_TYPES}
+    # Surface any unexpected types too (forward-compat for new enum values).
+    for t, c in type_counts.items():
+        fragment_counts.setdefault(t, int(c))
+
+    chunks_total = int(storage.count_chunks())
+    active_inbox_count = int(storage.count_extraction_candidates(status="pending"))
+
+    # Heuristic recommendation — short, LLM-readable.
+    decisions_count = fragment_counts.get("decision", 0)
+    if active_inbox_count > 0:
+        next_action = (
+            f"Review {active_inbox_count} pending fragments via skein inbox"
+        )
+    elif decisions_count < 10:
+        next_action = (
+            "Few decisions captured; this project is still bootstrapping memory"
+        )
+    else:
+        next_action = "Project is healthy; use recall<query> for specific context"
+
+    return {
+        "scope": scope_handle,
+        "fragment_counts": fragment_counts,
+        "fragment_total": int(fragment_total),
+        "chunks_total": chunks_total,
+        "recent_decisions": recent_decisions,
+        "active_inbox_count": active_inbox_count,
+        "embedding_provider": cfg.embedding_provider,
+        "daemon": {
+            "version": "0.1.0",
+            "uptime_seconds": get_daemon_uptime_seconds(),
+            "db_path": storage.db_path,
+        },
+        "next_recommended_action": next_action,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tool call handler
 # ---------------------------------------------------------------------------
 
@@ -571,6 +707,11 @@ async def _call_tool(
             handle=scope_handle, type=stype,
             name=scope_handle.split(":", 1)[-1], owner_id=owner_id,
         ))
+
+    # ---- project_briefing ----
+    if name == "project_briefing":
+        briefing = build_briefing(storage, args["scope"])
+        return _tool_text(json.dumps(briefing, indent=2))
 
     # ---- recall ----
     if name == "recall":

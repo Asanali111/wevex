@@ -1990,6 +1990,88 @@ def status(output_json: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# briefing — single-call project snapshot (LLM / human-friendly)
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.option("--scope", default=None, help="Override the auto-detected scope.")
+@click.option("--json", "output_json", is_flag=True, default=False,
+              help="Emit the raw JSON payload (LLM-friendly).")
+def briefing(scope: Optional[str], output_json: bool) -> None:
+    """Show the project's current state in one round trip.
+
+    Mirrors the `project_briefing` MCP tool: fragment counts by type, recent
+    decisions, daemon health, and a recommended next action.
+    """
+    from . import ui
+    scope_handle = _resolve_scope(scope)
+    with _client() as client:
+        _require_running(client)
+        try:
+            resp = client.get("/v1/briefing", params={"scope": scope_handle})
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            err_console.print(
+                f"  {ui.mark('err')} Failed to fetch briefing: {e}"
+            )
+            sys.exit(1)
+
+    if output_json:
+        print(json.dumps(data, indent=2))
+        return
+
+    counts = data.get("fragment_counts", {}) or {}
+    daemon = data.get("daemon", {}) or {}
+    recent = data.get("recent_decisions", []) or []
+
+    uptime_s = int(daemon.get("uptime_seconds", 0) or 0)
+    if uptime_s >= 3600:
+        uptime_str = f"{uptime_s // 3600}h {(uptime_s % 3600) // 60}m"
+    elif uptime_s >= 60:
+        uptime_str = f"{uptime_s // 60}m {uptime_s % 60}s"
+    else:
+        uptime_str = f"{uptime_s}s"
+
+    db_path = str(daemon.get("db_path", "?")).replace(str(Path.home()), "~")
+
+    ui.header(f"Briefing — {data.get('scope', scope_handle)}", state="ok")
+    ui.fields([
+        ("Daemon",   f"v{daemon.get('version', '?')}  ·  up {uptime_str}"),
+        ("Database", f"[dim]{db_path}[/dim]"),
+        ("Embed",    f"{data.get('embedding_provider', '?')}"),
+    ], label_width=10)
+    ui.blank()
+
+    ui.fields([
+        ("Fragments", f"[bold]{data.get('fragment_total', 0)}[/bold]"),
+        ("Chunks",    str(data.get("chunks_total", 0))),
+        ("Inbox",     f"{data.get('active_inbox_count', 0)} pending"),
+    ], label_width=10)
+    ui.blank()
+
+    # Type breakdown — only show non-zero rows so the output stays scannable.
+    type_rows = [
+        (k.capitalize(), str(v))
+        for k, v in sorted(counts.items(), key=lambda kv: -kv[1])
+        if v
+    ]
+    if type_rows:
+        ui.fields(type_rows, label_width=12)
+        ui.blank()
+
+    if recent:
+        ui.bullet("[bold]Recent decisions[/bold]")
+        for d in recent:
+            tool = d.get("created_by_tool") or "—"
+            line = d.get("content_first_line") or ""
+            ui.bullet(f"  [{d.get('id_short', '?')}] ({tool}) {line}")
+        ui.blank()
+
+    ui.hint(data.get("next_recommended_action", ""))
+
+
+# ---------------------------------------------------------------------------
 # preview — show exactly what gets injected into agent prompts
 # ---------------------------------------------------------------------------
 
