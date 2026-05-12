@@ -25,9 +25,11 @@ frontend/node_modules/
 frontend/dist/
 _archive_v2/frontend/node_modules/
 
-# Local tool configs (may contain tokens)
+# Local tool configs (may contain tokens — written by `skein sync`)
 .codex/
 .claude/settings.local.json
+.cursor/mcp.json
+# .vscode/ is already ignored above under "Editor"
 
 # Session handoff notes (per-machine transcripts; may quote dead tokens)
 HANDOFF.md
