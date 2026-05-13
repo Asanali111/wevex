@@ -361,9 +361,11 @@ class OpenCodeClient(BaseClient):
         path = oc_dir / "config.json"
         data = _read_json(path)
         data.setdefault("mcp", {}).setdefault("servers", {})
+        # opencode's MCP schema infers transport from the presence of `url` vs
+        # `command` keys (same shape as the Gemini CLI fix in iter 18.1) — don't
+        # write a separate `transport` field.
         data["mcp"]["servers"]["skein"] = {
             "url": mcp_url,
-            "transport": "http",
             "headers": {"Authorization": f"Bearer {bearer_token}"},
         }
         _write_json(path, data)
@@ -400,19 +402,27 @@ class CodexClient(BaseClient):
         path = codex_dir / "config.toml"
         existing = path.read_text() if path.exists() else ""
 
-        if "[[mcpServers]]" in existing and "skein" in existing:
-            return [str(path)]  # already present
+        # Iter 18.6+: strip any stale skein block before appending a fresh one,
+        # so a token rotation propagates here instead of being silently ignored.
+        # The previous "if skein in existing: return" guard meant the codex
+        # config kept the dead leaked token after iter-16's rotation — caught
+        # during iter 18 by a security sweep.
+        cleaned = _strip_codex_skein_block(existing)
 
+        # Codex's TOML schema infers transport from the presence of `url`
+        # (same shape as the Gemini CLI fix in iter 18.1) — don't write a
+        # separate `transport` field.
         block = (
             "\n[[mcpServers]]\n"
             'name = "skein"\n'
             f'url = "{mcp_url}"\n'
-            'transport = "http"\n'
             "[mcpServers.headers]\n"
             f'Authorization = "Bearer {bearer_token}"\n'
         )
-        with open(path, "a") as f:
-            f.write(block)
+        # Ensure exactly one trailing newline before the new block, no double-
+        # blank padding.
+        body = cleaned.rstrip() + "\n" if cleaned.strip() else ""
+        path.write_text(body + block)
         return [str(path)]
 
     def disconnect(self, recorded_paths=None) -> List[str]:

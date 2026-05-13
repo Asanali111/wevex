@@ -175,6 +175,15 @@ class TestOpenCodeClient:
         data = json.loads(cfg.read_text())
         assert data["mcp"]["servers"]["skein"]["url"] == "http://x/mcp"
 
+    def test_connect_omits_transport_key(self, fake_home, repo):
+        """opencode MCP schema infers transport from key presence (iter 18.6 fix
+        parallel to the Gemini CLI fix in iter 18.1)."""
+        clients_mod.OpenCodeClient().connect("http://x/mcp", "tok", "p", repo)
+        cfg = fake_home / ".config" / "opencode" / "config.json"
+        entry = json.loads(cfg.read_text())["mcp"]["servers"]["skein"]
+        assert "transport" not in entry
+        assert set(entry.keys()) == {"url", "headers"}
+
     def test_disconnect_removes_nested(self, fake_home, repo):
         client = clients_mod.OpenCodeClient()
         client.connect("http://x/mcp", "tok", "p", repo)
@@ -199,13 +208,28 @@ class TestCodexClient:
         assert 'url = "http://x/mcp"' in text
         assert 'Authorization = "Bearer tok"' in text
 
-    def test_connect_idempotent(self, fake_home, repo):
+    def test_connect_refreshes_on_reconnect(self, fake_home, repo):
+        """Second connect must REPLACE the existing skein block, not skip it.
+
+        Before iter 18.6 this method bailed out when 'skein' was already in
+        the config, leaving the previous (possibly rotated-away) token stuck.
+        That was caught when a security sweep found the dead leaked iter-16
+        token still living in .codex/config.toml."""
         c = clients_mod.CodexClient()
         c.connect("http://x/mcp", "tok", "p", repo)
         c.connect("http://x/mcp", "tok2", "p", repo)
         text = (repo / ".codex" / "config.toml").read_text()
-        # second call detects existing skein block and bails
+        # exactly one skein block — but with the NEW token, not the old one
         assert text.count('name = "skein"') == 1
+        assert 'Authorization = "Bearer tok2"' in text
+        assert 'Authorization = "Bearer tok"\n' not in text
+
+    def test_connect_omits_transport_key(self, fake_home, repo):
+        """Codex MCP TOML infers transport from key presence (iter 18.6 fix
+        parallel to the Gemini CLI fix in iter 18.1)."""
+        clients_mod.CodexClient().connect("http://x/mcp", "tok", "p", repo)
+        text = (repo / ".codex" / "config.toml").read_text()
+        assert "transport" not in text
 
     def test_connect_preserves_user_blocks(self, fake_home, repo):
         cfg = repo / ".codex" / "config.toml"
