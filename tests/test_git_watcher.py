@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import skein.git_watcher as git_watcher
 from skein.embeddings import HashEmbeddingProvider
 from skein.git_watcher import (
     GitCommit,
@@ -17,10 +18,8 @@ from skein.git_watcher import (
     parse_conventional,
     read_commits_since,
 )
-import skein.git_watcher as git_watcher
 from skein.models import IdentityCreate, ScopeCreate
 from skein.storage import Storage
-
 
 # ---------------------------------------------------------------------------
 # Conventional Commits parser
@@ -222,7 +221,7 @@ def watcher_setup(tmp_git_repo, tmp_path):
 
 
 def test_watcher_poll_promotes_commits_to_fragments(watcher_setup) -> None:
-    w, storage, scope, repo = watcher_setup
+    w, storage, scope, _repo = watcher_setup
     n = w.poll_once()
     assert n == 2  # both commits had conventional prefixes, neither is noise
     frags = storage.list_fragments(scope_id=scope.id, limit=50)
@@ -233,7 +232,7 @@ def test_watcher_poll_promotes_commits_to_fragments(watcher_setup) -> None:
 
 
 def test_watcher_skips_already_seen_commits(watcher_setup) -> None:
-    w, storage, scope, repo = watcher_setup
+    w, _storage, _scope, repo = watcher_setup
     w.poll_once()
     # Second poll with no new commits = 0
     assert w.poll_once() == 0
@@ -249,7 +248,7 @@ def test_watcher_skips_already_seen_commits(watcher_setup) -> None:
 
 
 def test_watcher_filters_noise_commits(watcher_setup) -> None:
-    w, storage, scope, repo = watcher_setup
+    w, _storage, _scope, repo = watcher_setup
     subprocess.run(["git", "commit", "--allow-empty", "-q",
                     "-m", "chore: bump version to 9.9.9"],
                    cwd=repo, check=True,

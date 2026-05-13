@@ -14,12 +14,15 @@ outperforms Condorcet and individual rank learning methods."
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
 
 from .embeddings import EmbeddingProvider, vec_to_bytes
 from .models import (
-    ChunkSearchRequest, ChunkSearchResponse, ChunkSearchResult,
-    Fragment, RecallRequest, RecallResponse, RecallResult,
+    ChunkSearchRequest,
+    ChunkSearchResponse,
+    ChunkSearchResult,
+    RecallRequest,
+    RecallResponse,
+    RecallResult,
 )
 from .storage import Storage
 
@@ -64,7 +67,7 @@ def recall(
     types = list(req.types) if req.types else None
 
     # 3. BM25 keyword search
-    keyword_hits: List[Tuple[str, float]] = []
+    keyword_hits: list[tuple[str, float]] = []
     try:
         keyword_hits = storage.keyword_search(
             req.query, scope_ids,
@@ -76,7 +79,7 @@ def recall(
         logger.warning("Keyword search failed: %s", e)
 
     # 4. Vector search
-    vector_hits: List[Tuple[str, float]] = []
+    vector_hits: list[tuple[str, float]] = []
     if have_embeddings and query_vec_bytes:
         try:
             vector_hits = storage.vector_search(
@@ -105,7 +108,7 @@ def recall(
     frag_ids = [fid for fid, _, _ in top]
     fragments_by_id = storage.get_fragments_by_ids(frag_ids)
 
-    results: List[RecallResult] = []
+    results: list[RecallResult] = []
     for rank, (fid, score, matched_by) in enumerate(top, start=1):
         frag = fragments_by_id.get(fid)
         if frag is None:
@@ -127,17 +130,17 @@ def recall(
 # ---------------------------------------------------------------------------
 
 def _rrf_fuse(
-    lists: List[List[Tuple[str, float]]],
-    list_names: List[str],
+    lists: list[list[tuple[str, float]]],
+    list_names: list[str],
     k: int = 60,
-) -> List[Tuple[str, float, str]]:
+) -> list[tuple[str, float, str]]:
     """Fuse multiple ranked lists with RRF.
 
     Returns list of (fragment_id, rrf_score, source_name) sorted desc by score.
     source_name indicates which list(s) contributed (e.g. "hybrid").
     """
-    rrf_scores: Dict[str, float] = {}
-    sources: Dict[str, List[str]] = {}
+    rrf_scores: dict[str, float] = {}
+    sources: dict[str, list[str]] = {}
 
     for ranked_list, name in zip(lists, list_names):
         for rank_0, (fid, _raw_score) in enumerate(ranked_list):
@@ -185,7 +188,7 @@ def search_chunks(
         logger.warning("Chunk embedding failed, keyword-only: %s", e)
 
     # BM25
-    keyword_hits: List[Tuple[str, float]] = []
+    keyword_hits: list[tuple[str, float]] = []
     try:
         keyword_hits = storage.chunks_keyword_search(
             req.query, scope_ids,
@@ -196,7 +199,7 @@ def search_chunks(
         logger.warning("chunks keyword search failed: %s", e)
 
     # Vector
-    vector_hits: List[Tuple[str, float]] = []
+    vector_hits: list[tuple[str, float]] = []
     if have_emb:
         try:
             vector_hits = storage.chunks_vector_search(
@@ -216,7 +219,7 @@ def search_chunks(
     chunk_ids = [cid for cid, _, _ in top]
     chunks_by_id = storage.get_chunks_by_ids(chunk_ids)
 
-    results: List[ChunkSearchResult] = []
+    results: list[ChunkSearchResult] = []
     for rank, (cid, score, matched_by) in enumerate(top, start=1):
         chunk = chunks_by_id.get(cid)
         if chunk is None:
@@ -231,11 +234,11 @@ def search_chunks(
 
 
 def _post_filter(
-    fused: List[Tuple[str, float, str]],
+    fused: list[tuple[str, float, str]],
     storage: Storage,
-    territory: Optional[str],
-    tags: Optional[List[str]],
-) -> List[Tuple[str, float, str]]:
+    territory: str | None,
+    tags: list[str] | None,
+) -> list[tuple[str, float, str]]:
     """Post-filter fused results by territory prefix and/or tags."""
     if not territory and not tags:
         return fused
@@ -245,7 +248,7 @@ def _post_filter(
 
     filtered = []
     for item in fused:
-        fid, score, src = item
+        fid, _score, _src = item
         frag = frags.get(fid)
         if frag is None:
             continue

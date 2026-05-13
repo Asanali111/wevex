@@ -16,11 +16,11 @@ class ScenarioResult:
     name: str
     category: str
     status: Status = "pass"
-    metrics: Dict[str, float] = field(default_factory=dict)
+    metrics: dict[str, float] = field(default_factory=dict)
     reason: str = ""
-    notes: Dict[str, Any] = field(default_factory=dict)
+    notes: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name, "category": self.category, "status": self.status,
             "metrics": self.metrics, "reason": self.reason, "notes": self.notes,

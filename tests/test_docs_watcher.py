@@ -11,7 +11,6 @@ from skein.models import IdentityCreate, ScopeCreate
 from skein.passive import promote_scanned_facts
 from skein.storage import Storage
 
-
 # ---------------------------------------------------------------------------
 # Basic discovery & shape
 # ---------------------------------------------------------------------------

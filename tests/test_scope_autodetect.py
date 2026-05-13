@@ -2,11 +2,8 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 
-import pytest
-
-from skein.scope_resolver import auto_detect_scope, _clean_handle_part
+from skein.scope_resolver import _clean_handle_part, auto_detect_scope
 
 
 class TestCleanHandlePart:

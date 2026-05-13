@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
 
-from skein.events import EventLogger, MAX_BYTES, default_path, log_event, reset_event_logger
+from skein.events import MAX_BYTES, default_path, log_event, reset_event_logger
 
 
 @pytest.fixture

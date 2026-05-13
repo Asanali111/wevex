@@ -28,7 +28,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger("skein.events")
 
@@ -54,7 +54,7 @@ class EventLogger:
     Thread/process-safe at the line level — relies on POSIX O_APPEND atomicity.
     """
 
-    def __init__(self, path: Optional[Path] = None) -> None:
+    def __init__(self, path: Path | None = None) -> None:
         self.path: Path = path or default_path()
         # Caller may construct an EventLogger before the path exists. Parent
         # dir is created lazily on first write so a misconfigured path doesn't
@@ -63,11 +63,11 @@ class EventLogger:
 
     # ---- public ----
 
-    def log(self, event: str, scope: Optional[str] = None, **fields: Any) -> None:
+    def log(self, event: str, scope: str | None = None, **fields: Any) -> None:
         """Append one event. Never raises."""
         try:
             self._maybe_rotate()
-            record: Dict[str, Any] = {
+            record: dict[str, Any] = {
                 "ts": _now_iso(),
                 "event": event,
             }
@@ -127,7 +127,7 @@ class EventLogger:
 # Singleton
 # ---------------------------------------------------------------------------
 
-_LOGGER: Optional[EventLogger] = None
+_LOGGER: EventLogger | None = None
 
 
 def get_event_logger() -> EventLogger:
@@ -145,7 +145,7 @@ def reset_event_logger() -> None:
     _LOGGER = None
 
 
-def log_event(event: str, scope: Optional[str] = None, **fields: Any) -> None:
+def log_event(event: str, scope: str | None = None, **fields: Any) -> None:
     """Convenience wrapper around the singleton."""
     get_event_logger().log(event, scope=scope, **fields)
 

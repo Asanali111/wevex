@@ -1,16 +1,17 @@
 """Tests for storage.py — SQLite CRUD + FTS + lease logic."""
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from skein.models import (
-    CommitCreate, FragmentCreate, FragmentUpdate,
-    IdentityCreate, LeaseCreate, ScopeCreate, ScopeMembershipCreate,
+    CommitCreate,
+    FragmentCreate,
+    FragmentUpdate,
+    IdentityCreate,
+    LeaseCreate,
+    ScopeCreate,
 )
 from skein.storage import ConflictError, Storage
-
 
 # ---------------------------------------------------------------------------
 # Identity
@@ -75,7 +76,7 @@ def test_scope_lineage(storage: Storage) -> None:
         handle="team:backend", type="team", name="Backend",
         owner_id=user.id, parent_scope_id=org.id,
     ))
-    project = storage.create_scope(ScopeCreate(
+    storage.create_scope(ScopeCreate(
         handle="project:api", type="project", name="API",
         owner_id=user.id, parent_scope_id=team.id,
     ))
@@ -302,7 +303,7 @@ def test_lease_conflict_detection(seeded_storage: Storage) -> None:
     scope = st._test_scope
     user = st._test_user
 
-    user2 = st.create_identity(IdentityCreate(
+    st.create_identity(IdentityCreate(
         handle="user:agent2", type="agent", name="Agent 2",
     ))
 
@@ -530,7 +531,7 @@ def test_list_fragments_since_and_exclude_tool_combined(seeded_storage: Storage)
         (f_old_cursor.id,),
     )
     # A fresh fragment from claude_code — should be excluded
-    f_cc = st.create_fragment(FragmentCreate(
+    st.create_fragment(FragmentCreate(
         type="state", content="fresh from claude_code",
         scope_id=scope.id, owner_id=user.id,
         created_by_tool="claude_code",

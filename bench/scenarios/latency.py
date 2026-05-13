@@ -5,14 +5,12 @@ on the mutable adapter. The live (read-only) adapter skips ingest.
 """
 from __future__ import annotations
 
-import statistics
 import time
-from typing import Callable, List
+from typing import Callable
 
 from ..adapter import MutableAdapter, ReadOnlyAdapter
 from ..corpus import code_files, fragments
 from ..scenarios import ScenarioResult
-
 
 _RECALL_QUERIES = [
     "database choice", "session caching", "rate limit",
@@ -33,7 +31,7 @@ def _time(fn: Callable[[], object]) -> float:
     return (time.perf_counter() - t0) * 1000.0
 
 
-def _pcts(samples: List[float]) -> dict:
+def _pcts(samples: list[float]) -> dict:
     if not samples:
         return {"p50": 0.0, "p95": 0.0, "max": 0.0, "n": 0}
     samples = sorted(samples)
@@ -50,12 +48,12 @@ def measure_recall_latency(
     adapter: ReadOnlyAdapter,
     *,
     scope: str,
-    queries: List[str] = _RECALL_QUERIES,
+    queries: list[str] = _RECALL_QUERIES,
     warm_repeats: int = 3,
 ) -> ScenarioResult:
     """One cold pass, then ``warm_repeats`` repeated passes; report both."""
-    cold: List[float] = []
-    warm: List[float] = []
+    cold: list[float] = []
+    warm: list[float] = []
     for q in queries:
         cold.append(_time(lambda q=q: adapter.recall(q, scope, limit=5)))
     for _ in range(warm_repeats):
@@ -77,7 +75,7 @@ def measure_search_latency(
     adapter: ReadOnlyAdapter,
     *,
     scope: str,
-    queries: List[str] = _SEARCH_QUERIES,
+    queries: list[str] = _SEARCH_QUERIES,
     warm_repeats: int = 3,
 ) -> ScenarioResult:
     """Same shape as recall latency, but over the code-search path."""
@@ -86,8 +84,8 @@ def measure_search_latency(
             name="search_latency", category="latency", status="skipped",
             reason="adapter does not declare code-search support",
         )
-    cold: List[float] = []
-    warm: List[float] = []
+    cold: list[float] = []
+    warm: list[float] = []
     for q in queries:
         cold.append(_time(lambda q=q: adapter.search_code(q, scope, limit=5)))
     for _ in range(warm_repeats):
@@ -143,7 +141,7 @@ def measure_seed_throughput(
     """Insert the 25-fragment corpus and report fragments/sec."""
     frags = fragments()
     t0 = time.perf_counter()
-    durations: List[float] = []
+    durations: list[float] = []
     for f in frags:
         ts = time.perf_counter()
         adapter.remember(
@@ -170,7 +168,7 @@ def measure_seed_throughput(
 
 def all_latency_scenarios(
     adapter: ReadOnlyAdapter, *, scope: str,
-) -> List[ScenarioResult]:
+) -> list[ScenarioResult]:
     out = [
         measure_recall_latency(adapter, scope=scope),
         measure_search_latency(adapter, scope=scope),

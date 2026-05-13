@@ -35,7 +35,6 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Iterable, List, Optional, Set, Tuple
 
 from .scanner import ScannedFact
 
@@ -71,7 +70,7 @@ ADR_CONFIDENCE = 0.92
 # ---------------------------------------------------------------------------
 
 
-def scan_docs(repo: Path) -> List[ScannedFact]:
+def scan_docs(repo: Path) -> list[ScannedFact]:
     """Scan a project's markdown documentation and return ScannedFact list.
 
     Discovery patterns (all relative to ``repo``):
@@ -96,7 +95,7 @@ def scan_docs(repo: Path) -> List[ScannedFact]:
     if not paths:
         return []
 
-    facts: List[ScannedFact] = []
+    facts: list[ScannedFact] = []
     for path in paths:
         try:
             facts.extend(_process_file(repo, path))
@@ -112,7 +111,7 @@ def scan_docs(repo: Path) -> List[ScannedFact]:
 
 # Patterns are processed in declaration order; results are sorted at the end
 # so the union is deterministic regardless of glob walk order.
-_GLOB_PATTERNS: Tuple[str, ...] = (
+_GLOB_PATTERNS: tuple[str, ...] = (
     "README*",
     "CHANGELOG*",
     "CONTRIBUTING*",
@@ -127,9 +126,9 @@ _GLOB_PATTERNS: Tuple[str, ...] = (
 )
 
 
-def _discover_doc_paths(repo: Path, ignored: Set[str]) -> List[Path]:
+def _discover_doc_paths(repo: Path, ignored: set[str]) -> list[Path]:
     """Return a sorted, deduped list of doc paths under ``repo``."""
-    seen: Set[Path] = set()
+    seen: set[Path] = set()
     for pattern in _GLOB_PATTERNS:
         for hit in repo.glob(pattern):
             if not hit.is_file():
@@ -171,7 +170,7 @@ def _is_text_doc(p: Path) -> bool:
 # Always skip these directory prefixes even if .gitignore is missing. Hidden
 # dirs are blanket-skipped (see _is_ignored) with the explicit ``.skein/docs/``
 # carve-out so project-local overrides still get picked up.
-_BUILTIN_SKIP_DIRS: Tuple[str, ...] = (
+_BUILTIN_SKIP_DIRS: tuple[str, ...] = (
     "node_modules/",
     ".venv/",
     "venv/",
@@ -182,7 +181,7 @@ _BUILTIN_SKIP_DIRS: Tuple[str, ...] = (
 )
 
 
-def _load_gitignore_patterns(repo: Path) -> Set[str]:
+def _load_gitignore_patterns(repo: Path) -> set[str]:
     """Read the project's ``.gitignore`` and return a set of normalized
     path-prefix patterns. Empty set if no .gitignore exists.
 
@@ -190,7 +189,7 @@ def _load_gitignore_patterns(repo: Path) -> Set[str]:
     no glob expansion. Just simple prefix matches against the repo-relative
     path. Good enough for the common case of `docs/private/` style entries.
     """
-    out: Set[str] = set()
+    out: set[str] = set()
     gi = repo / ".gitignore"
     if not gi.is_file():
         return out
@@ -210,7 +209,7 @@ def _load_gitignore_patterns(repo: Path) -> Set[str]:
     return out
 
 
-def _is_ignored(repo: Path, path: Path, gitignore: Set[str]) -> bool:
+def _is_ignored(repo: Path, path: Path, gitignore: set[str]) -> bool:
     """Return True if ``path`` should be skipped (gitignore or builtin)."""
     try:
         rel = path.relative_to(repo)
@@ -248,7 +247,7 @@ def _is_ignored(repo: Path, path: Path, gitignore: Set[str]) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _process_file(repo: Path, path: Path) -> List[ScannedFact]:
+def _process_file(repo: Path, path: Path) -> list[ScannedFact]:
     """Read one doc file and emit zero or more ScannedFacts.
 
     Classification order (overlapping rules in the spec resolved here):
@@ -335,7 +334,7 @@ def _make_license_fact(rel_str: str, text: str, stem: str) -> ScannedFact:
 _HEADING_RE = re.compile(r"^(#{1,2})\s+(.+?)\s*$", re.MULTILINE)
 
 
-def _split_by_heading(rel_str: str, text: str, stem: str) -> List[ScannedFact]:
+def _split_by_heading(rel_str: str, text: str, stem: str) -> list[ScannedFact]:
     """Split ``text`` into one fragment per top-level (H1/H2) heading.
 
     Headings deeper than H2 are kept inside their parent section. Content
@@ -368,7 +367,7 @@ def _split_by_heading(rel_str: str, text: str, stem: str) -> List[ScannedFact]:
         base_tags.append("contributing")
         territory = "contributing"
 
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     for heading, body in sections:
         slug = _slugify(heading)
         fragment_body = body.strip()
@@ -398,7 +397,7 @@ def _truncate_body(s: str) -> str:
     return s[:SECTION_FRAGMENT_MAX - len("\n…(truncated)")].rstrip() + "\n…(truncated)"
 
 
-def _extract_sections(text: str) -> List[Tuple[str, str]]:
+def _extract_sections(text: str) -> list[tuple[str, str]]:
     """Return [(heading_title, body), …] split by ``^#`` or ``^##`` lines.
 
     The body of each section runs up to the next H1/H2 heading. H3+ headings
@@ -407,7 +406,7 @@ def _extract_sections(text: str) -> List[Tuple[str, str]]:
     matches = list(_HEADING_RE.finditer(text))
     if not matches:
         return []
-    sections: List[Tuple[str, str]] = []
+    sections: list[tuple[str, str]] = []
     for i, m in enumerate(matches):
         title = m.group(2).strip()
         body_start = m.end()
@@ -434,14 +433,14 @@ def _is_adr(rel_str: str, filename: str) -> bool:
     return any(seg in lowered for seg in ("/adr/", "/decisions/", "/architecture/"))
 
 
-def _split_adr(rel_str: str, text: str, stem: str) -> List[ScannedFact]:
+def _split_adr(rel_str: str, text: str, stem: str) -> list[ScannedFact]:
     """Emit one or more ``decision`` fragments for an ADR.
 
     Short ADRs become a single fragment. Longer ones are split by H1/H2 so
     "Context", "Decision", "Consequences" become individually queryable.
     """
     adr_number = _adr_number(stem)
-    base_tags: List[str] = ["docs", "adr", stem]
+    base_tags: list[str] = ["docs", "adr", stem]
     if adr_number:
         base_tags.append(adr_number)
 
@@ -470,7 +469,7 @@ def _split_adr(rel_str: str, text: str, stem: str) -> List[ScannedFact]:
             topic_key=f"docs:{stem}",
         )]
 
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     for heading, body in sections:
         slug = _slugify(heading)
         body = body.strip()
@@ -494,7 +493,7 @@ def _split_adr(rel_str: str, text: str, stem: str) -> List[ScannedFact]:
     return out
 
 
-def _adr_number(stem: str) -> Optional[str]:
+def _adr_number(stem: str) -> str | None:
     m = re.match(r"^ADR[-_]?(\d+)", stem, re.IGNORECASE)
     if m:
         return f"ADR-{m.group(1)}"
@@ -508,7 +507,7 @@ def _adr_number(stem: str) -> Optional[str]:
 _CHANGELOG_ENTRY_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 
 
-def _split_changelog(rel_str: str, text: str, stem: str) -> List[ScannedFact]:
+def _split_changelog(rel_str: str, text: str, stem: str) -> list[ScannedFact]:
     """Parse a CHANGELOG into one fragment per ``^## `` entry.
 
     Conventions vary; we just pull each H2 block as-is, slug the header for
@@ -520,7 +519,7 @@ def _split_changelog(rel_str: str, text: str, stem: str) -> List[ScannedFact]:
         # Fall back to treating the whole file as a single state fragment.
         return [_make_short_doc_fact(rel_str, text[:SHORT_FILE_CHARS], stem)]
 
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     for i, m in enumerate(matches):
         if i >= CHANGELOG_ENTRY_CAP:
             break

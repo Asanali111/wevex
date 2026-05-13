@@ -12,13 +12,13 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
 
-DEFAULTS: Dict[str, Any] = {
+DEFAULTS: dict[str, Any] = {
     "port": 8765,
     "host": "127.0.0.1",
     "db_path": str(Path.home() / ".config" / "skein" / "skein.db"),
@@ -43,7 +43,7 @@ DEFAULTS: Dict[str, Any] = {
 class SkeinConfig:
     """Holds runtime configuration for the Skein daemon."""
 
-    def __init__(self, data: Dict[str, Any]) -> None:
+    def __init__(self, data: dict[str, Any]) -> None:
         merged = {**DEFAULTS, **data}
         self.port: int = int(merged["port"])
         self.host: str = merged["host"]
@@ -56,12 +56,12 @@ class SkeinConfig:
         self.stale_mark_interval: int = int(merged["stale_mark_interval"])
         self.default_scope: str = merged["default_scope"]
         # keep raw dict for serialising back
-        self._raw: Dict[str, Any] = merged
+        self._raw: dict[str, Any] = merged
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return dict(self._raw)
 
-    def save(self, path: Optional[Path] = None) -> None:
+    def save(self, path: Path | None = None) -> None:
         p = path or _default_config_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         with open(p, "w") as f:
@@ -114,7 +114,7 @@ def _load_dotenv_file(path: Path) -> None:
             os.environ[key] = value
 
 
-def load_config(path: Optional[Path] = None) -> SkeinConfig:
+def load_config(path: Path | None = None) -> SkeinConfig:
     """Load config from disk, then overlay SKEIN_* env vars."""
     p = path or _default_config_path()
     # Iter 15: source ``~/.config/skein/.env`` (alongside the JSON config) so
@@ -122,7 +122,7 @@ def load_config(path: Optional[Path] = None) -> SkeinConfig:
     # the only safe place to put GEMINI_API_KEY when the daemon runs under
     # launchd, which doesn't inherit the user's shell environment.
     _load_dotenv_file(p.parent / ".env")
-    data: Dict[str, Any] = {}
+    data: dict[str, Any] = {}
     if p.exists():
         with open(p) as f:
             data = json.load(f)
@@ -148,7 +148,7 @@ def load_config(path: Optional[Path] = None) -> SkeinConfig:
 # Shared singleton (lazy-loaded per process)
 # ---------------------------------------------------------------------------
 
-_config: Optional[SkeinConfig] = None
+_config: SkeinConfig | None = None
 
 
 def get_config() -> SkeinConfig:
@@ -158,7 +158,7 @@ def get_config() -> SkeinConfig:
     return _config
 
 
-def reset_config(cfg: Optional[SkeinConfig] = None) -> None:
+def reset_config(cfg: SkeinConfig | None = None) -> None:
     """Replace the singleton — useful in tests."""
     global _config
     _config = cfg

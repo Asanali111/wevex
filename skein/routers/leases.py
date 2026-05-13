@@ -1,8 +1,6 @@
 """REST router: /v1/leases — advisory file-glob locks."""
 from __future__ import annotations
 
-from typing import List, Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..auth import AuthContext, RequireAuth
@@ -47,14 +45,14 @@ def acquire_lease(
     return storage.acquire_lease(data)
 
 
-@router.get("", response_model=List[Lease])
+@router.get("", response_model=list[Lease])
 def list_leases(
-    scope: Optional[str] = Query(None, description="Scope handle or ID"),
+    scope: str | None = Query(None, description="Scope handle or ID"),
     active_only: bool = True,
     auth: AuthContext = RequireAuth,
     storage: Storage = Depends(get_storage),
-) -> List[Lease]:
-    scope_id: Optional[str] = None
+) -> list[Lease]:
+    scope_id: str | None = None
     if scope:
         scope_obj = storage.get_scope(scope)
         if not scope_obj:

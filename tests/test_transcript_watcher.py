@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from skein.transcript_watcher import (
     ClaudeCodeTranscriptWatcher,
     decode_claude_project_dir,
@@ -13,7 +11,6 @@ from skein.transcript_watcher import (
     parse_jsonl_line,
     transcripts_for_project,
 )
-
 
 # ---------------------------------------------------------------------------
 # JSONL parsing
@@ -153,9 +150,9 @@ def test_transcripts_for_project_finds_jsonl(tmp_path: Path) -> None:
 def test_watcher_poll_once_extracts_and_advances_cursor(tmp_path: Path) -> None:
     """End-to-end: write a transcript, poll, verify candidates landed and
     the cursor moved to EOF."""
-    from skein.storage import Storage
-    from skein.models import IdentityCreate, ScopeCreate
     from skein.embeddings import HashEmbeddingProvider
+    from skein.models import IdentityCreate, ScopeCreate
+    from skein.storage import Storage
 
     db_path = tmp_path / "test.db"
     storage = Storage(str(db_path))

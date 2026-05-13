@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
 
 from .models import Fragment
 from .storage import Storage
@@ -34,8 +33,8 @@ def render_agents_md(
     storage: Storage,
     *,
     daemon_url: str = "http://127.0.0.1:8765",
-    project_name: Optional[str] = None,
-    existing_content: Optional[str] = None,
+    project_name: str | None = None,
+    existing_content: str | None = None,
 ) -> str:
     """Render AGENTS.md for a scope.
 
@@ -59,7 +58,7 @@ def render_agents_md(
     name = project_name or scope.name or scope_handle
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    lines: List[str] = []
+    lines: list[str] = []
 
     # ---- Header ----
     lines.append(f"# AGENTS.md — {name}")
@@ -70,8 +69,8 @@ def render_agents_md(
     lines.append("## How to use Skein in this project — read BEFORE you do anything else")
     lines.append("")
     lines.append("Skein is the fastest path to context here. Concrete numbers:")
-    lines.append(f"- `project_briefing()` returns the project dashboard in ONE call — <50ms, ~300 tokens.")
-    lines.append(f"- `recall(\"<your task>\")` returns top-K relevant fragments — <100ms, ~30 tokens per fragment.")
+    lines.append("- `project_briefing()` returns the project dashboard in ONE call — <50ms, ~300 tokens.")
+    lines.append("- `recall(\"<your task>\")` returns top-K relevant fragments — <100ms, ~30 tokens per fragment.")
     lines.append("- For comparison: reading 3 source files for the same context costs 3000+ tokens, 5+ round trips, and often misses the WHY.")
     lines.append("")
     lines.append("**Default behavior for any task on this project:**")
@@ -115,7 +114,7 @@ def render_agents_md(
         )
         lines.append("")
         # Group by source tool for clarity
-        by_tool: Dict[str, List] = {}
+        by_tool: dict[str, list] = {}
         for f in fact_frags:
             tool = f.created_by_tool or "unknown"
             by_tool.setdefault(tool, []).append(f)
@@ -208,7 +207,7 @@ def render_claude_md_shim() -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _append_fragment_bullet(lines: List[str], frag: Fragment) -> None:
+def _append_fragment_bullet(lines: list[str], frag: Fragment) -> None:
     territory = f" *(territory: {frag.territory})*" if frag.territory else ""
     tags = f" [tags: {', '.join(frag.tags)}]" if frag.tags else ""
     lines.append(f"- {frag.content}{territory}{tags}")

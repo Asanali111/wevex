@@ -7,7 +7,7 @@ tree.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 import pytest
@@ -18,7 +18,7 @@ from skein.tui.app import SkeinApp
 # Mock daemon client
 # ---------------------------------------------------------------------------
 
-_CANNED_BRIEFING: Dict[str, Any] = {
+_CANNED_BRIEFING: dict[str, Any] = {
     "scope": "project:test-scope",
     "fragment_counts": {
         "decision": 3, "fact": 2, "observation": 1, "preference": 0,
@@ -53,22 +53,22 @@ class FakeClient:
     raise ``httpx.ConnectError`` instead — the simulated daemon-down case.
     """
 
-    def __init__(self, *, raise_on: Optional[List[str]] = None) -> None:
+    def __init__(self, *, raise_on: list[str] | None = None) -> None:
         self.raise_on = set(raise_on or [])
 
     def _maybe_raise(self, name: str) -> None:
         if name in self.raise_on:
             raise httpx.ConnectError("simulated daemon-down")
 
-    async def health(self) -> Dict[str, Any]:
+    async def health(self) -> dict[str, Any]:
         self._maybe_raise("health")
         return {"status": "ok"}
 
-    async def briefing(self, scope: Optional[str]) -> Dict[str, Any]:
+    async def briefing(self, scope: str | None) -> dict[str, Any]:
         self._maybe_raise("briefing")
         return dict(_CANNED_BRIEFING)
 
-    async def recall(self, query: str, scope: str, limit: int = 10) -> Dict[str, Any]:
+    async def recall(self, query: str, scope: str, limit: int = 10) -> dict[str, Any]:
         self._maybe_raise("recall")
         return {
             "hits": [
@@ -83,7 +83,7 @@ class FakeClient:
             ]
         }
 
-    async def list_clients(self) -> List[Dict[str, Any]]:
+    async def list_clients(self) -> list[dict[str, Any]]:
         self._maybe_raise("list_clients")
         return [
             {"id": "claude_code", "display_name": "Claude Code",
@@ -92,7 +92,7 @@ class FakeClient:
              "detected": True, "connected": False},
         ]
 
-    async def list_inbox(self, scope: Optional[str], limit: int = 50) -> List[Dict[str, Any]]:
+    async def list_inbox(self, scope: str | None, limit: int = 50) -> list[dict[str, Any]]:
         self._maybe_raise("list_inbox")
         return [
             {
@@ -104,13 +104,13 @@ class FakeClient:
             }
         ]
 
-    async def approve_candidate(self, candidate_id: str) -> Dict[str, Any]:
+    async def approve_candidate(self, candidate_id: str) -> dict[str, Any]:
         return {"returncode": 0, "stdout": "", "stderr": ""}
 
-    async def reject_candidate(self, candidate_id: str) -> Dict[str, Any]:
+    async def reject_candidate(self, candidate_id: str) -> dict[str, Any]:
         return {"returncode": 0, "stdout": "", "stderr": ""}
 
-    async def read_events(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def read_events(self, limit: int = 100) -> list[dict[str, Any]]:
         self._maybe_raise("read_events")
         return [
             {"ts": "2026-05-13T10:00:00Z", "event": "recall",
@@ -121,7 +121,7 @@ class FakeClient:
         pass
 
 
-def _make_app(*, raise_on: Optional[List[str]] = None) -> SkeinApp:
+def _make_app(*, raise_on: list[str] | None = None) -> SkeinApp:
     """Build a SkeinApp wired to a FakeClient with no daemon round trips."""
     return SkeinApp(
         scope="project:test-scope",

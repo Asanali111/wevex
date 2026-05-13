@@ -11,12 +11,10 @@ from __future__ import annotations
 
 import json
 
-import pytest
 from fastapi.testclient import TestClient
 
 from skein.models import FragmentCreate
 from skein.storage import Storage
-
 
 # ---------------------------------------------------------------------------
 # count_fragments_by_type — single GROUP BY query
@@ -54,7 +52,7 @@ def test_count_fragments_by_type_excludes_stale_by_default(seeded_storage: Stora
     scope_id = st._test_scope.id
     user_id = st._test_user.id
 
-    f1 = st.create_fragment(FragmentCreate(
+    st.create_fragment(FragmentCreate(
         type="decision", content="alive",
         scope_id=scope_id, owner_id=user_id,
     ))

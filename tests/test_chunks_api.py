@@ -4,7 +4,6 @@ from __future__ import annotations
 from skein.embeddings import HashEmbeddingProvider, vec_to_bytes
 from skein.models import ChunkCreate, IdentityCreate, ScopeCreate
 
-
 # ---------------------------------------------------------------------------
 # Helpers — seed some chunks via the storage layer (faster than ingesting)
 # ---------------------------------------------------------------------------

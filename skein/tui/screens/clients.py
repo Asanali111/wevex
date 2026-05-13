@@ -1,7 +1,7 @@
 """Clients pane — connected/available status for every supported LLM client."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from textual import work
 from textual.app import ComposeResult
@@ -16,7 +16,7 @@ class ClientsPane(Container):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._client: Optional[DaemonClient] = None
+        self._client: DaemonClient | None = None
         self._scope: str = ""
 
     def compose(self) -> ComposeResult:
@@ -42,7 +42,7 @@ class ClientsPane(Container):
         status = self.query_one("#clients-status", Static)
         table = self.query_one("#clients-table", DataTable)
         try:
-            entries: List[Dict[str, Any]] = await self._client.list_clients()
+            entries: list[dict[str, Any]] = await self._client.list_clients()
         except Exception as e:
             status.update(
                 f"[red]Could not load client status: {type(e).__name__}: {e}[/red]"

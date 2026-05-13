@@ -18,12 +18,11 @@ report names the API addition that would unblock the measurement.
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..adapter import MutableAdapter
 from ..corpus import fragments, labeled_queries
 from ..scenarios import ScenarioResult
-
 
 _SCOPE = "project:bench-handoff"
 _WRITE_TOOL = "claude_code"
@@ -32,7 +31,7 @@ _N_FRAGMENTS = 5
 
 
 def _query_for_fragment(
-    fragment: Dict[str, Any], by_expected_top: Dict[str, Dict[str, Any]],
+    fragment: dict[str, Any], by_expected_top: dict[str, dict[str, Any]],
 ) -> str:
     """Pick a labeled query targeting this fragment, else synthesize one.
 
@@ -51,7 +50,7 @@ def _query_for_fragment(
     return " ".join(p for p in parts if p)
 
 
-def _supports_source_tool(adapter: MutableAdapter, scope: str) -> Optional[str]:
+def _supports_source_tool(adapter: MutableAdapter, scope: str) -> str | None:
     """Probe whether the adapter accepts ``source_tool`` on remember + recall.
 
     Returns ``None`` on success, else a human-readable reason string
@@ -112,7 +111,7 @@ def measure_cross_session_handoff(adapter: MutableAdapter) -> ScenarioResult:
     all_frags = fragments()
     chosen = [f for f in all_frags if (f.get("content") or "").strip()][:_N_FRAGMENTS]
 
-    label_to_adapter_id: Dict[str, str] = {}
+    label_to_adapter_id: dict[str, str] = {}
     for f in chosen:
         adapter_id = adapter.remember(
             f["content"],
@@ -124,15 +123,15 @@ def measure_cross_session_handoff(adapter: MutableAdapter) -> ScenarioResult:
         label_to_adapter_id[f["id"]] = adapter_id
 
     # ---- Build the query list (simulating tool B's session) ------------
-    by_expected_top: Dict[str, Dict[str, Any]] = {}
+    by_expected_top: dict[str, dict[str, Any]] = {}
     for q in labeled_queries():
         top = q.get("expected_top")
         if top and top not in by_expected_top:
             by_expected_top[top] = q
 
     # ---- Query: tool B asks --------------------------------------------
-    misses: List[Dict[str, Any]] = []
-    durations_ms: List[float] = []
+    misses: list[dict[str, Any]] = []
+    durations_ms: list[float] = []
     successes = 0
     total = len(chosen)
 

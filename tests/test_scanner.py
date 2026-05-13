@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from skein.scanner import (
     AUTO_PROMOTE_THRESHOLD,
     DISCARD_THRESHOLD,

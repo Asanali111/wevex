@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -161,11 +160,11 @@ def test_extract_user_block_whitespace_tolerance() -> None:
 # ---------------------------------------------------------------------------
 
 def test_sync_writes_cursor_mcp(tmp_path: Path, monkeypatch) -> None:
-    from skein.sync import sync_all
     from skein import connections as conns
+    from skein.sync import sync_all
     monkeypatch.setattr(conns, "CONNECTIONS_PATH", tmp_path / "connections.json")
 
-    result = sync_all(
+    sync_all(
         daemon_url="http://127.0.0.1:8765",
         bearer_token="testtoken",
         scope_handle="project:test",
@@ -182,8 +181,8 @@ def test_sync_writes_cursor_mcp(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_sync_writes_vscode_mcp(tmp_path: Path, monkeypatch) -> None:
-    from skein.sync import sync_all
     from skein import connections as conns
+    from skein.sync import sync_all
     monkeypatch.setattr(conns, "CONNECTIONS_PATH", tmp_path / "connections.json")
 
     sync_all(
@@ -200,8 +199,8 @@ def test_sync_writes_vscode_mcp(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_sync_writes_agents_md(tmp_path: Path, monkeypatch) -> None:
-    from skein.sync import sync_all
     from skein import connections as conns
+    from skein.sync import sync_all
     monkeypatch.setattr(conns, "CONNECTIONS_PATH", tmp_path / "connections.json")
 
     agents_md = "# AGENTS.md\nTest content for agents."
@@ -219,8 +218,8 @@ def test_sync_writes_agents_md(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_sync_writes_claude_md_shim(tmp_path: Path, monkeypatch) -> None:
-    from skein.sync import sync_all
     from skein import connections as conns
+    from skein.sync import sync_all
     monkeypatch.setattr(conns, "CONNECTIONS_PATH", tmp_path / "connections.json")
 
     sync_all(
@@ -236,8 +235,8 @@ def test_sync_writes_claude_md_shim(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_sync_does_not_overwrite_custom_claude_md(tmp_path: Path, monkeypatch) -> None:
-    from skein.sync import sync_all
     from skein import connections as conns
+    from skein.sync import sync_all
     monkeypatch.setattr(conns, "CONNECTIONS_PATH", tmp_path / "connections.json")
 
     claude_md = tmp_path / "CLAUDE.md"
@@ -255,8 +254,8 @@ def test_sync_does_not_overwrite_custom_claude_md(tmp_path: Path, monkeypatch) -
 
 
 def test_sync_merges_existing_cursor_config(tmp_path: Path, monkeypatch) -> None:
-    from skein.sync import sync_all
     from skein import connections as conns
+    from skein.sync import sync_all
     monkeypatch.setattr(conns, "CONNECTIONS_PATH", tmp_path / "connections.json")
 
     cursor_dir = tmp_path / ".cursor"

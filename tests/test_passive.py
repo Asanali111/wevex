@@ -1,8 +1,6 @@
 """Tests for the passive promotion pipeline (iter 14.1)."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from skein.embeddings import HashEmbeddingProvider
@@ -275,8 +273,8 @@ def test_unchanged_content_retires_legacy_duplicate(storage_setup) -> None:
     storage, scope, ident, provider = storage_setup
     # Seed two identical legacy fragments by stubbing the dedup table — the
     # safest way is to write directly, bypassing promote.
-    from skein.models import FragmentCreate as FC
     from skein.models import CommitCreate as CC
+    from skein.models import FragmentCreate as FC
     commit = storage.create_commit(CC(
         author_id=ident.id, scope_id=scope.id, message="seed",
     ))

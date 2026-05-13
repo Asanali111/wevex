@@ -5,7 +5,8 @@ import pytest
 
 from skein.embeddings import HashEmbeddingProvider, vec_to_bytes
 from skein.models import (
-    FragmentCreate, IdentityCreate, RecallRequest, ScopeCreate,
+    FragmentCreate,
+    RecallRequest,
 )
 from skein.retrieval import _rrf_fuse, recall
 from skein.storage import Storage
@@ -31,7 +32,7 @@ def filled_storage(seeded_storage: Storage) -> Storage:
 
     for frag_type, content, territory in contents:
         vec = provider.embed_one(content)
-        frag = st.create_fragment(
+        st.create_fragment(
             FragmentCreate(
                 type=frag_type, content=content,
                 scope_id=scope.id, owner_id=user.id,
@@ -175,7 +176,7 @@ def test_recall_result_ranking(filled_storage: Storage) -> None:
 
 def test_recall_scope_lineage(filled_storage: Storage) -> None:
     """A query on a child scope should return parent-scope fragments too."""
-    from skein.models import IdentityCreate, ScopeCreate, FragmentCreate
+    from skein.models import ScopeCreate
 
     st = filled_storage
     parent_scope = st._test_scope

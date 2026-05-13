@@ -31,7 +31,6 @@ import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
 
 logger = logging.getLogger("skein.projects")
 
@@ -55,11 +54,11 @@ class ProjectEntry:
     root: str
     source_root: str
     added_at: str = field(default_factory=lambda: _now_iso())
-    last_ingest: Optional[str] = None
+    last_ingest: str | None = None
     watch: bool = True   # whether the daemon should auto-reingest on file changes
 
     @staticmethod
-    def from_dict(d: dict) -> "ProjectEntry":
+    def from_dict(d: dict) -> ProjectEntry:
         return ProjectEntry(
             scope=d["scope"],
             root=d["root"],
@@ -105,14 +104,14 @@ def _save_raw(data: dict) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def list_projects() -> List[ProjectEntry]:
+def list_projects() -> list[ProjectEntry]:
     """Return all registered projects, oldest first."""
     with _LOCK:
         data = _load_raw()
         return [ProjectEntry.from_dict(p) for p in data.get("projects", [])]
 
 
-def get_project(root_or_scope: str) -> Optional[ProjectEntry]:
+def get_project(root_or_scope: str) -> ProjectEntry | None:
     """Look up a project by its root path or its scope handle."""
     target = str(Path(root_or_scope).resolve()) if Path(root_or_scope).is_absolute() else root_or_scope
     for p in list_projects():

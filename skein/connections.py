@@ -24,8 +24,6 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
-
 
 CONNECTIONS_PATH = Path.home() / ".config" / "skein" / "connections.json"
 
@@ -34,7 +32,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _load() -> Dict[str, Dict]:
+def _load() -> dict[str, dict]:
     if not CONNECTIONS_PATH.exists():
         return {}
     try:
@@ -45,7 +43,7 @@ def _load() -> Dict[str, Dict]:
         return {}
 
 
-def _save(data: Dict[str, Dict]) -> None:
+def _save(data: dict[str, dict]) -> None:
     CONNECTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = CONNECTIONS_PATH.with_suffix(".json.tmp")
     with open(tmp, "w") as f:
@@ -54,7 +52,7 @@ def _save(data: Dict[str, Dict]) -> None:
     os.replace(tmp, CONNECTIONS_PATH)
 
 
-def get_connected_ids() -> List[str]:
+def get_connected_ids() -> list[str]:
     """Return the list of connected client IDs (sorted)."""
     return sorted(_load().keys())
 
@@ -63,16 +61,16 @@ def is_connected(client_id: str) -> bool:
     return client_id in _load()
 
 
-def get_connection(client_id: str) -> Optional[Dict]:
+def get_connection(client_id: str) -> dict | None:
     return _load().get(client_id)
 
 
-def list_all() -> Dict[str, Dict]:
+def list_all() -> dict[str, dict]:
     """Return the full registry."""
     return _load()
 
 
-def mark_connected(client_id: str, config_paths: List[str]) -> None:
+def mark_connected(client_id: str, config_paths: list[str]) -> None:
     """Record a successful connect — overwrites any prior entry."""
     data = _load()
     data[client_id] = {
@@ -92,7 +90,7 @@ def mark_disconnected(client_id: str) -> bool:
     return True
 
 
-def get_paths(client_id: str) -> List[str]:
+def get_paths(client_id: str) -> list[str]:
     """Return the config paths recorded for ``client_id`` (empty if none)."""
     entry = get_connection(client_id)
     if not entry:

@@ -6,7 +6,7 @@ the visible buffer.
 """
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict, List, Optional, Set, Tuple
+from typing import Any, ClassVar
 
 from textual import work
 from textual.app import ComposeResult
@@ -23,19 +23,19 @@ _POLL_SECONDS = 2.0
 class EventsPane(Container):
     """Live event tail."""
 
-    BINDINGS: ClassVar[List[Binding]] = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("p", "toggle_pause", "pause", show=False),
         Binding("c", "clear", "clear", show=False),
     ]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._client: Optional[DaemonClient] = None
+        self._client: DaemonClient | None = None
         self._scope: str = ""
         self._paused: bool = False
-        self._poll_timer: Optional[Timer] = None
+        self._poll_timer: Timer | None = None
         # Track which event lines we've already shown (by (ts, event, scope)).
-        self._seen: Set[Tuple[str, str, str]] = set()
+        self._seen: set[tuple[str, str, str]] = set()
 
     def compose(self) -> ComposeResult:
         yield DataTable(id="events-log", zebra_stripes=True, cursor_type="row")
@@ -85,7 +85,7 @@ class EventsPane(Container):
         if self._client is None:
             return
         try:
-            records: List[Dict[str, Any]] = await self._client.read_events(limit=100)
+            records: list[dict[str, Any]] = await self._client.read_events(limit=100)
         except Exception as e:
             status = self.query_one("#events-status", Static)
             status.update(f"[red]Could not read events: {type(e).__name__}: {e}[/red]")
@@ -110,7 +110,7 @@ class EventsPane(Container):
             table.action_scroll_end()
 
 
-def _summarise_details(details: Dict[str, Any]) -> str:
+def _summarise_details(details: dict[str, Any]) -> str:
     bits = []
     for k in ("query", "preview", "glob"):
         v = details.get(k)

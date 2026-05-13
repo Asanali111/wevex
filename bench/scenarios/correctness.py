@@ -13,8 +13,6 @@ Each check returns its own ``ScenarioResult`` so they can fail independently.
 """
 from __future__ import annotations
 
-from typing import List
-
 from ..adapter import MutableAdapter
 from ..scenarios import ScenarioResult
 
@@ -109,7 +107,7 @@ def check_fragment_typing(adapter: MutableAdapter) -> ScenarioResult:
     )
 
 
-def all_correctness_scenarios(adapter: MutableAdapter) -> List[ScenarioResult]:
+def all_correctness_scenarios(adapter: MutableAdapter) -> list[ScenarioResult]:
     return [
         check_scope_hierarchy(adapter),
         check_lease_lifecycle(adapter),

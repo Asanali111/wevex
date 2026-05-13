@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List, Optional
 
 import httpx
 
@@ -29,7 +28,7 @@ class SkeinLiveAdapter(ReadOnlyAdapter):
     supports_scope_hierarchy = True
     supports_git_capture = True
 
-    def __init__(self, base_url: Optional[str] = None, token: Optional[str] = None):
+    def __init__(self, base_url: str | None = None, token: str | None = None):
         cfg = self._load_config()
         host = cfg.get("host", "127.0.0.1")
         port = cfg.get("port", 8765)
@@ -75,8 +74,8 @@ class SkeinLiveAdapter(ReadOnlyAdapter):
         scope: str,
         *,
         limit: int = 10,
-        types: Optional[List[str]] = None,
-    ) -> List[FragmentResult]:
+        types: list[str] | None = None,
+    ) -> list[FragmentResult]:
         body = {"query": query, "scope": scope, "limit": limit}
         if types:
             body["types"] = types
@@ -99,7 +98,7 @@ class SkeinLiveAdapter(ReadOnlyAdapter):
         scope: str,
         *,
         limit: int = 10,
-    ) -> List[CodeChunkResult]:
+    ) -> list[CodeChunkResult]:
         body = {"query": query, "scope": scope, "limit": limit}
         r = self._client.post("/v1/chunks/search", json=body)
         r.raise_for_status()

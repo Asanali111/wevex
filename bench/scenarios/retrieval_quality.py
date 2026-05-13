@@ -9,16 +9,14 @@ the mapping at seed time, then look up by that map.
 """
 from __future__ import annotations
 
-from typing import Dict, List
-
 from ..adapter import MutableAdapter
 from ..corpus import fragments, labeled_queries
 from ..scenarios import ScenarioResult
 
 
-def _seed_fragments(adapter: MutableAdapter, *, scope: str) -> Dict[str, str]:
+def _seed_fragments(adapter: MutableAdapter, *, scope: str) -> dict[str, str]:
     """Return ``{label_id: adapter_id}`` mapping."""
-    mapping: Dict[str, str] = {}
+    mapping: dict[str, str] = {}
     for f in fragments():
         adapter_id = adapter.remember(
             f["content"], type=f["type"], scope=scope, tags=f.get("tags", []),
@@ -31,13 +29,13 @@ def _hit_at_k(
     adapter: MutableAdapter,
     *,
     scope: str,
-    label_to_adapter: Dict[str, str],
-    k_values: List[int] = (1, 3, 5),
+    label_to_adapter: dict[str, str],
+    k_values: list[int] = (1, 3, 5),
 ) -> ScenarioResult:
     queries = labeled_queries()
     hits = {k: 0 for k in k_values}
     mrr_sum = 0.0
-    per_query: List[dict] = []
+    per_query: list[dict] = []
 
     for q in queries:
         results = adapter.recall(q["query"], scope=scope, limit=max(k_values))
@@ -77,7 +75,7 @@ def _hit_at_k(
     # Per-difficulty breakdown — distinguishes 'engine broken' from
     # 'embedding provider is bm25-tier'. Easy queries share tokens with
     # their target; hard queries require paraphrase robustness.
-    by_diff: Dict[str, List[bool]] = {}
+    by_diff: dict[str, list[bool]] = {}
     for q, row in zip(queries, per_query):
         d = q.get("difficulty", "unknown")
         # success at "hit_at_5" granularity

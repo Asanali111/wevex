@@ -10,7 +10,6 @@ from __future__ import annotations
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from ..adapter import (
     CodeChunkResult,
@@ -32,19 +31,19 @@ class SkeinEphemeralAdapter(MutableAdapter):
 
     def __init__(self, *, embedding_provider: str = "hash"):
         self._embedding_provider_name = embedding_provider
-        self._tmpdir: Optional[Path] = None
+        self._tmpdir: Path | None = None
         self._storage = None
         self._provider = None
-        self._user_id: Optional[str] = None
-        self._scopes: Dict[str, str] = {}  # handle -> id
+        self._user_id: str | None = None
+        self._scopes: dict[str, str] = {}  # handle -> id
         self._open()
 
     # ---- lifecycle ------------------------------------------------------
 
     def _open(self) -> None:
         from skein.embeddings import get_provider
-        from skein.storage import Storage
         from skein.models import IdentityCreate
+        from skein.storage import Storage
 
         self._tmpdir = Path(tempfile.mkdtemp(prefix="bench_skein_"))
         db_path = self._tmpdir / "skein.db"
@@ -107,8 +106,8 @@ class SkeinEphemeralAdapter(MutableAdapter):
         scope: str,
         *,
         limit: int = 10,
-        types: Optional[List[str]] = None,
-    ) -> List[FragmentResult]:
+        types: list[str] | None = None,
+    ) -> list[FragmentResult]:
         from skein.models import RecallRequest
         from skein.retrieval import recall as do_recall
 
@@ -130,7 +129,7 @@ class SkeinEphemeralAdapter(MutableAdapter):
         scope: str,
         *,
         limit: int = 10,
-    ) -> List[CodeChunkResult]:
+    ) -> list[CodeChunkResult]:
         from skein.models import ChunkSearchRequest
         from skein.retrieval import search_chunks
 
@@ -148,7 +147,7 @@ class SkeinEphemeralAdapter(MutableAdapter):
 
     # ---- MutableAdapter -------------------------------------------------
 
-    def ensure_scope(self, handle: str, *, parent: Optional[str] = None) -> str:
+    def ensure_scope(self, handle: str, *, parent: str | None = None) -> str:
         from skein.models import ScopeCreate
 
         if handle in self._scopes:
@@ -168,8 +167,8 @@ class SkeinEphemeralAdapter(MutableAdapter):
         *,
         type: str,
         scope: str,
-        tags: Optional[List[str]] = None,
-        territory: Optional[str] = None,
+        tags: list[str] | None = None,
+        territory: str | None = None,
     ) -> str:
         from skein.models import FragmentCreate
 
@@ -180,7 +179,7 @@ class SkeinEphemeralAdapter(MutableAdapter):
         )
         # Embed if provider produces real vectors; harmless if it doesn't.
         from skein.embeddings import vec_to_bytes
-        embedding_bytes: Optional[bytes] = None
+        embedding_bytes: bytes | None = None
         try:
             vec = self._provider.embed_one(content)
             embedding_bytes = vec_to_bytes(vec)
@@ -191,7 +190,7 @@ class SkeinEphemeralAdapter(MutableAdapter):
 
     def ingest_text(
         self,
-        files: Dict[str, str],
+        files: dict[str, str],
         *,
         scope: str,
         source_root: str = "bench",
@@ -227,7 +226,9 @@ class SkeinEphemeralAdapter(MutableAdapter):
     def capture_git_commits(self, repo_path: str, *, scope: str) -> int:
         """Use the real watcher path. Returns how many commits became fragments."""
         from skein.git_watcher import (
-            commit_to_fact, is_noise_commit, read_commits_since,
+            commit_to_fact,
+            is_noise_commit,
+            read_commits_since,
         )
         from skein.models import FragmentCreate
 
@@ -252,7 +253,7 @@ class SkeinEphemeralAdapter(MutableAdapter):
             created += 1
         return created
 
-    def claim_lease(self, glob: str, *, scope: str, ttl_seconds: int = 60) -> Optional[str]:
+    def claim_lease(self, glob: str, *, scope: str, ttl_seconds: int = 60) -> str | None:
         from skein.models import LeaseCreate
 
         scope_id = self._scope_id(scope)

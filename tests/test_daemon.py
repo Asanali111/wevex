@@ -6,15 +6,12 @@ the "_pick_backend" logic and on real hardware in `skein up`.
 """
 from __future__ import annotations
 
-import os
-import time
 from pathlib import Path
 
 import pytest
 
 from skein import daemon as daemon_mod
-from skein.daemon import DaemonStatus, current_status, ensure_running, stop
-
+from skein.daemon import current_status, ensure_running
 
 # ---------------------------------------------------------------------------
 # Shared isolation: redirect Path.home() so we don't touch the user's setup

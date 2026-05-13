@@ -7,10 +7,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -37,7 +36,7 @@ FRAGMENT_TYPES = frozenset({
 })
 
 # Default TTL by fragment type (seconds).  None = permanent.
-FRAGMENT_DEFAULT_TTL: Dict[str, Optional[int]] = {
+FRAGMENT_DEFAULT_TTL: dict[str, int | None] = {
     "preference":   90 * 86400,
     "fact":         30 * 86400,
     "decision":     30 * 86400,
@@ -57,7 +56,7 @@ class IdentityCreate(BaseModel):
     handle: str = Field(..., description="Unique namespaced handle, e.g. 'user:ameliomar'")
     type: str = Field(..., description=f"One of {sorted(IDENTITY_TYPES)}")
     name: str
-    config: Dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("type")
     @classmethod
@@ -82,7 +81,7 @@ class ScopeCreate(BaseModel):
     handle: str = Field(..., description="Unique scope handle, e.g. 'project:skein'")
     type: str = Field(..., description=f"One of {sorted(SCOPE_TYPES)}")
     name: str
-    parent_scope_id: Optional[str] = None
+    parent_scope_id: str | None = None
     owner_id: str
 
     @field_validator("type")
@@ -128,11 +127,11 @@ class CommitCreate(BaseModel):
     author_id: str
     scope_id: str
     message: str
-    parent_commit_id: Optional[str] = None
-    fragments_added: List[str] = Field(default_factory=list)
-    fragments_modified: List[str] = Field(default_factory=list)
-    fragments_removed: List[str] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    parent_commit_id: str | None = None
+    fragments_added: list[str] = Field(default_factory=list)
+    fragments_modified: list[str] = Field(default_factory=list)
+    fragments_removed: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Commit(CommitCreate):
@@ -151,20 +150,20 @@ class FragmentCreate(BaseModel):
     content: str = Field(..., min_length=1)
     scope_id: str
     owner_id: str
-    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
-    ttl_seconds: Optional[int] = Field(None, description="Override default TTL. 0 = permanent.")
-    tags: List[str] = Field(default_factory=list)
-    territory: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    confidence: float | None = Field(None, ge=0.0, le=1.0)
+    ttl_seconds: int | None = Field(None, description="Override default TTL. 0 = permanent.")
+    tags: list[str] = Field(default_factory=list)
+    territory: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
     # Provenance (iter 14.0). All optional — explicit MCP calls fill these
     # automatically; manual REST calls may leave them blank.
-    created_by_tool: Optional[str] = None
-    created_in_session_id: Optional[str] = None
-    created_against_commit: Optional[str] = None
-    files_open_at_creation: List[str] = Field(default_factory=list)
-    supersedes_fragment_id: Optional[str] = None
+    created_by_tool: str | None = None
+    created_in_session_id: str | None = None
+    created_against_commit: str | None = None
+    files_open_at_creation: list[str] = Field(default_factory=list)
+    supersedes_fragment_id: str | None = None
     extraction_method: str = Field("explicit", description="explicit | code-scan | transcript-claude | …")
-    extraction_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    extraction_confidence: float | None = Field(None, ge=0.0, le=1.0)
 
     @field_validator("type")
     @classmethod
@@ -174,7 +173,7 @@ class FragmentCreate(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _set_ttl_default(self) -> "FragmentCreate":
+    def _set_ttl_default(self) -> FragmentCreate:
         """Apply type-based default TTL unless caller set ttl_seconds explicitly."""
         if self.ttl_seconds is None:
             default = FRAGMENT_DEFAULT_TTL.get(self.type)
@@ -188,13 +187,13 @@ class FragmentCreate(BaseModel):
 
 class FragmentUpdate(BaseModel):
     """All fields optional — PATCH semantics."""
-    content: Optional[str] = Field(None, min_length=1)
-    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
-    tags: Optional[List[str]] = None
-    territory: Optional[str] = None
-    is_stale: Optional[bool] = None
-    stale_reason: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    content: str | None = Field(None, min_length=1)
+    confidence: float | None = Field(None, ge=0.0, le=1.0)
+    tags: list[str] | None = None
+    territory: str | None = None
+    is_stale: bool | None = None
+    stale_reason: str | None = None
+    metadata: dict[str, Any] | None = None
     # For OCC: caller must send the version they last read.
     expected_version: int = Field(..., description="Optimistic-concurrency version from last read")
 
@@ -203,11 +202,11 @@ class Fragment(FragmentCreate):
     id: str = Field(default_factory=_new_id)
     version: int = 1
     permanent: bool = False
-    expires_at: Optional[str] = None
+    expires_at: str | None = None
     is_stale: bool = False
-    stale_reason: Optional[str] = None
-    source_commit_id: Optional[str] = None
-    superseded_by_fragment_id: Optional[str] = None  # mirror of the FK in DB
+    stale_reason: str | None = None
+    source_commit_id: str | None = None
+    superseded_by_fragment_id: str | None = None  # mirror of the FK in DB
     created_at: str = Field(default_factory=_now_iso)
     updated_at: str = Field(default_factory=_now_iso)
 
@@ -223,8 +222,8 @@ class LeaseCreate(BaseModel):
     glob: str = Field(..., description="File-glob pattern, e.g. 'backend/auth/**'")
     owner_id: str
     ttl_seconds: int = Field(300, description="How long to hold the lease (seconds). Default 5 min.")
-    reason: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Lease(LeaseCreate):
@@ -250,10 +249,10 @@ class ChunkCreate(BaseModel):
     content: str = Field(..., min_length=1)
     line_start: int = Field(..., ge=1)
     line_end: int = Field(..., ge=1)
-    language: Optional[str] = None
+    language: str | None = None
     chunk_type: str = "window"
-    symbol_name: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    symbol_name: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("chunk_type")
     @classmethod
@@ -274,8 +273,8 @@ class Chunk(ChunkCreate):
 class ChunkSearchRequest(BaseModel):
     query: str = Field(..., min_length=1)
     scope: str
-    languages: Optional[List[str]] = None
-    source_root: Optional[str] = None
+    languages: list[str] | None = None
+    source_root: str | None = None
     limit: int = Field(10, ge=1, le=50)
 
 
@@ -287,7 +286,7 @@ class ChunkSearchResult(BaseModel):
 
 
 class ChunkSearchResponse(BaseModel):
-    results: List[ChunkSearchResult]
+    results: list[ChunkSearchResult]
     query: str
     scope: str
     total: int
@@ -297,8 +296,8 @@ class ChunkStats(BaseModel):
     scope: str
     total_chunks: int
     total_files: int
-    by_language: Dict[str, int]
-    by_root: Dict[str, int]
+    by_language: dict[str, int]
+    by_root: dict[str, int]
 
 
 # ---------------------------------------------------------------------------
@@ -308,9 +307,9 @@ class ChunkStats(BaseModel):
 class RecallRequest(BaseModel):
     query: str = Field(..., min_length=1)
     scope: str
-    types: Optional[List[str]] = None
-    territory: Optional[str] = None
-    tags: Optional[List[str]] = None
+    types: list[str] | None = None
+    territory: str | None = None
+    tags: list[str] | None = None
     limit: int = Field(10, ge=1, le=50)
     include_stale: bool = False
 
@@ -332,7 +331,7 @@ class RecallResult(BaseModel):
 
 
 class RecallResponse(BaseModel):
-    results: List[RecallResult]
+    results: list[RecallResult]
     query: str
     scope: str
     total: int
@@ -357,5 +356,5 @@ class HealthResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: str
-    detail: Optional[str] = None
-    code: Optional[str] = None
+    detail: str | None = None
+    code: str | None = None

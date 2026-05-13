@@ -1,8 +1,6 @@
 """Tests for the scope resolution helper used by both CLI and hook handlers."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from skein.scope_resolver import find_scope_pin, resolve_scope

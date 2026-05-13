@@ -22,10 +22,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
 
 logger = logging.getLogger("skein.hooks_install")
 
@@ -35,9 +33,9 @@ _SKEIN_MARKER_KEY = "__skein_managed"
 
 @dataclass
 class InstallReport:
-    written: List[str] = field(default_factory=list)
-    skipped: List[str] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
+    written: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
     def ok(self, label: str, path: str) -> None:
         self.written.append(f"{label}: {path}")
@@ -153,7 +151,7 @@ def _install_claude_code_global(
 
 
 def _merge_claude_skein_hooks(
-    settings: dict, skein_bin: str, scope_handle: Optional[str],
+    settings: dict, skein_bin: str, scope_handle: str | None,
 ) -> None:
     """Merge Skein hook entries into a Claude Code settings dict, idempotently.
 

@@ -1,19 +1,18 @@
 """Tests for the codebase RAG layer: storage methods, ingest, search."""
 from __future__ import annotations
 
-import json
 import textwrap
 from pathlib import Path
 
 import pytest
 
-from skein.embeddings import HashEmbeddingProvider, vec_to_bytes
+from skein.embeddings import vec_to_bytes
 from skein.ingest import _chunk_text, ingest_directory
 from skein.models import (
-    ChunkCreate, ChunkSearchRequest, IdentityCreate, ScopeCreate,
+    ChunkCreate,
+    ChunkSearchRequest,
 )
 from skein.retrieval import search_chunks
-
 
 # ---------------------------------------------------------------------------
 # Fixture helpers

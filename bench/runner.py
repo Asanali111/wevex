@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any
 
 from .adapter import MutableAdapter, ReadOnlyAdapter
 from .budgets import evaluate
@@ -16,9 +16,9 @@ from .scenarios.retrieval_quality import measure_retrieval_quality
 @dataclass
 class BenchmarkReport:
     adapter_name: str
-    health: Dict[str, Any]
-    scenarios: List[ScenarioResult] = field(default_factory=list)
-    budget_evaluations: Dict[str, Dict[str, dict]] = field(default_factory=dict)
+    health: dict[str, Any]
+    scenarios: list[ScenarioResult] = field(default_factory=list)
+    budget_evaluations: dict[str, dict[str, dict]] = field(default_factory=dict)
 
     @property
     def overall_status(self) -> str:
@@ -30,7 +30,7 @@ class BenchmarkReport:
                 worst = max(worst, 2)  # budget miss = fail
         return {0: "pass", 1: "warn", 2: "fail", 3: "error"}[worst]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "adapter_name": self.adapter_name,
             "health": self.health,
@@ -63,7 +63,7 @@ def run(
     them as ``skipped`` with a reason.
     """
     health = adapter.health()
-    scenarios: List[ScenarioResult] = []
+    scenarios: list[ScenarioResult] = []
 
     # If mutable, run a clean reset first so seeded scenarios start fresh.
     if isinstance(adapter, MutableAdapter):
@@ -116,15 +116,17 @@ def run(
 
 def _seed_then_measure_latency(
     adapter: MutableAdapter, *, scope: str,
-) -> List[ScenarioResult]:
+) -> list[ScenarioResult]:
     """Ingest + seed first (their throughput numbers are also useful), then
     measure recall/search latency against the seeded state."""
     from .scenarios.latency import (
-        measure_ingest_throughput, measure_recall_latency,
-        measure_search_latency, measure_seed_throughput,
+        measure_ingest_throughput,
+        measure_recall_latency,
+        measure_search_latency,
+        measure_seed_throughput,
     )
 
-    out: List[ScenarioResult] = []
+    out: list[ScenarioResult] = []
     out.append(_run_safely("ingest_throughput", "latency",
                            lambda: measure_ingest_throughput(adapter, scope=scope)))
     out.append(_run_safely("fragment_write_throughput", "latency",

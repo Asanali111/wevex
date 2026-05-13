@@ -8,8 +8,12 @@ import pytest
 
 from skein import projects as projects_mod
 from skein.projects import (
-    ProjectEntry, get_project, list_projects, remove_project,
-    touch_last_ingest, upsert_project,
+    ProjectEntry,
+    get_project,
+    list_projects,
+    remove_project,
+    touch_last_ingest,
+    upsert_project,
 )
 
 
@@ -63,7 +67,7 @@ class TestRegistry:
     def test_upsert_preserves_added_at(self, isolated_registry, tmp_path):
         root = str(tmp_path / "preserve")
         Path(root).mkdir()
-        first = upsert_project(ProjectEntry(
+        upsert_project(ProjectEntry(
             scope="project:p", root=root, source_root="preserve",
             added_at="2026-01-01T00:00:00Z",
         ))

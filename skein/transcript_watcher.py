@@ -23,13 +23,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
 
 from .scanner import ScannedFact
 
@@ -47,7 +44,7 @@ def default_claude_code_root() -> Path:
 
 
 def transcripts_for_project(cwd: Path,
-                             root: Optional[Path] = None) -> List[Path]:
+                             root: Path | None = None) -> list[Path]:
     """All transcript files for the given project working directory.
 
     Claude Code encodes the project path by replacing ``/`` with ``-`` and
@@ -72,12 +69,12 @@ def transcripts_for_project(cwd: Path,
 class ParsedMessage:
     role: str           # "user" | "assistant"
     text: str
-    timestamp: Optional[str] = None
-    session_id: Optional[str] = None
-    uuid: Optional[str] = None
+    timestamp: str | None = None
+    session_id: str | None = None
+    uuid: str | None = None
 
 
-def parse_jsonl_line(raw: str) -> Optional[ParsedMessage]:
+def parse_jsonl_line(raw: str) -> ParsedMessage | None:
     """Pull the text content out of one Claude Code JSONL line.
 
     Returns None for non-text events (file snapshots, permission mode,
@@ -145,7 +142,7 @@ class ExtractionPattern:
 # discards. Tune via testing.
 # ---------------------------------------------------------------------------
 
-_PATTERNS: List[ExtractionPattern] = [
+_PATTERNS: list[ExtractionPattern] = [
     # "let's use X" / "let us use X" — high signal, user-stated decision
     ExtractionPattern(
         pattern=re.compile(
@@ -241,9 +238,9 @@ def _scrub_secrets(text: str) -> str:
     return text
 
 
-def extract_from_message(msg: ParsedMessage) -> List[ScannedFact]:
+def extract_from_message(msg: ParsedMessage) -> list[ScannedFact]:
     """Run every pattern over one parsed message. Returns 0+ candidate facts."""
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     text = _scrub_secrets(msg.text)
     if "[REDACTED-SECRET]" in text:
         # We don't try to extract from messages that contained secrets; risk
@@ -279,7 +276,7 @@ def extract_from_message(msg: ParsedMessage) -> List[ScannedFact]:
     return out
 
 
-def extract_from_text(text: str, role: str = "user") -> List[ScannedFact]:
+def extract_from_text(text: str, role: str = "user") -> list[ScannedFact]:
     """Convenience wrapper used by tests."""
     return extract_from_message(ParsedMessage(role=role, text=text))
 
@@ -310,7 +307,7 @@ class ClaudeCodeTranscriptWatcher:
         owner_id: str,
         project_cwd: Path,
         poll_interval: float = 2.0,
-        client_root: Optional[Path] = None,
+        client_root: Path | None = None,
         source_tool: str = "transcript-claude",
     ) -> None:
         self.storage = storage
@@ -322,7 +319,7 @@ class ClaudeCodeTranscriptWatcher:
         self.client_root = client_root or default_claude_code_root()
         self.source_tool = source_tool
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
     # ---- lifecycle ----
 
@@ -373,7 +370,7 @@ class ClaudeCodeTranscriptWatcher:
             cursor = 0
         new_msgs = 0
         new_cursor = cursor
-        candidates: List[ScannedFact] = []
+        candidates: list[ScannedFact] = []
         try:
             with open(path, "rb") as f:
                 f.seek(cursor)
@@ -428,7 +425,7 @@ class ClaudeCodeTranscriptWatcher:
 # ---------------------------------------------------------------------------
 
 
-def decode_claude_project_dir(name: str) -> Optional[Path]:
+def decode_claude_project_dir(name: str) -> Path | None:
     """Reverse the Claude Code path encoding.
 
     ``-Users-ameliomar-Documents-foo`` → ``/Users/ameliomar/Documents/foo``.
@@ -459,7 +456,7 @@ class MultiProjectTranscriptWatcher:
         storage_factory,        # callable that returns a fresh Storage handle
         provider,
         poll_interval: float = 3.0,
-        client_root: Optional[Path] = None,
+        client_root: Path | None = None,
         get_owner_id,           # callable() -> identity id
     ) -> None:
         self.storage_factory = storage_factory
@@ -468,7 +465,7 @@ class MultiProjectTranscriptWatcher:
         self.client_root = client_root or default_claude_code_root()
         self.get_owner_id = get_owner_id
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -493,9 +490,9 @@ class MultiProjectTranscriptWatcher:
                 logger.debug("multi watcher poll failed", exc_info=True)
             self._stop.wait(self.poll_interval)
 
-    def poll_once(self) -> Dict[str, int]:
+    def poll_once(self) -> dict[str, int]:
         """Returns ``{project_path: new_messages_processed}`` for telemetry."""
-        out: Dict[str, int] = {}
+        out: dict[str, int] = {}
         if not self.client_root.is_dir():
             return out
         storage = self.storage_factory()
@@ -526,7 +523,7 @@ class MultiProjectTranscriptWatcher:
                 pass
         return out
 
-    def _resolve_scope_id(self, storage, project_path: Path) -> Optional[str]:
+    def _resolve_scope_id(self, storage, project_path: Path) -> str | None:
         """Look up the scope this project maps to.
 
         Order:
@@ -534,7 +531,7 @@ class MultiProjectTranscriptWatcher:
           2. ``project:<basename>`` if it already exists in the scopes table
         """
         pin = project_path / ".skein" / "scope"
-        scope_handle: Optional[str] = None
+        scope_handle: str | None = None
         if pin.is_file():
             try:
                 scope_handle = pin.read_text().strip()

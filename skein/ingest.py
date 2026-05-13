@@ -30,9 +30,10 @@ import fnmatch
 import hashlib
 import logging
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable
 
 from .embeddings import EmbeddingProvider, vec_to_bytes
 from .models import ChunkCreate
@@ -47,7 +48,7 @@ logger = logging.getLogger("skein.ingest")
 EMBED_BATCH = 32                   # chunks per embedding-provider call
 
 # File-extension → language label.  Add more as needed.
-LANGUAGE_BY_EXT: Dict[str, str] = {
+LANGUAGE_BY_EXT: dict[str, str] = {
     ".py": "python", ".pyi": "python",
     ".js": "javascript", ".jsx": "javascript",
     ".mjs": "javascript", ".cjs": "javascript",
@@ -92,7 +93,7 @@ LANGUAGE_BY_EXT: Dict[str, str] = {
 # Anything that's user-private state, agent-cache, build output, or third-party
 # package source. Privacy categories are flagged so a future audit can verify
 # we never index browser/credential data.
-DEFAULT_EXCLUDES: Tuple[str, ...] = (
+DEFAULT_EXCLUDES: tuple[str, ...] = (
     # VCS
     ".git", ".hg", ".svn",
     # Language / build caches
@@ -125,7 +126,7 @@ DEFAULT_EXCLUDES: Tuple[str, ...] = (
 
 # Filename substrings that flag a file as private and skip-on-sight,
 # even if it has an extension we'd otherwise ingest.
-SENSITIVE_FILENAME_FRAGMENTS: Tuple[str, ...] = (
+SENSITIVE_FILENAME_FRAGMENTS: tuple[str, ...] = (
     "passwords", "credential", "id_rsa", "id_ed25519", "id_ecdsa",
     ".env", "secret", "api_key", "apikey",
 )
@@ -141,7 +142,7 @@ _SYSTEM_ROOTS = {
 }
 
 
-def _refuse_root(root: Path) -> Optional[str]:
+def _refuse_root(root: Path) -> str | None:
     """Return a reason string if ``root`` is a forbidden ingest target."""
     raw = str(root)
     resolved = root.resolve()
@@ -186,8 +187,8 @@ class IngestStats:
     chunks_updated: int = 0
     chunks_pruned: int = 0
     bytes_processed: int = 0
-    skipped_paths: List[str] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
+    skipped_paths: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
     embedding_degraded: bool = False  # set if the provider gave up mid-run
 
 
@@ -198,18 +199,18 @@ class IngestStats:
 def ingest_directory(
     root: Path,
     storage: Storage,
-    provider: Optional[EmbeddingProvider],
+    provider: EmbeddingProvider | None,
     *,
     scope_id: str,
     source_root: str,
     chunk_lines: int = 80,
     overlap_lines: int = 10,
-    include_exts: Optional[Iterable[str]] = None,
+    include_exts: Iterable[str] | None = None,
     extra_excludes: Iterable[str] = (),
     max_file_bytes: int = MAX_FILE_BYTES,
     prune_missing: bool = False,
     dry_run: bool = False,
-    progress_cb: Optional[Callable[[str, IngestStats], None]] = None,
+    progress_cb: Callable[[str, IngestStats], None] | None = None,
 ) -> IngestStats:
     """Ingest every supported file under ``root`` into the chunks table.
 
@@ -253,13 +254,13 @@ def ingest_directory(
             "Pass an explicit project directory."
         )
 
-    include_set: Set[str] = (
+    include_set: set[str] = (
         set(include_exts) if include_exts is not None else set(DEFAULT_INCLUDE_EXTS)
     )
     excludes = set(DEFAULT_EXCLUDES) | set(extra_excludes)
 
-    seen_paths: Set[Tuple[str, str]] = set()  # (source_root, source_path)
-    pending: List[Tuple[ChunkCreate, str]] = []   # (chunk, content_hash)
+    seen_paths: set[tuple[str, str]] = set()  # (source_root, source_path)
+    pending: list[tuple[ChunkCreate, str]] = []   # (chunk, content_hash)
 
     for path in _walk(root, include_set, excludes):
         rel = path.relative_to(root).as_posix()
@@ -343,12 +344,12 @@ def ingest_directory(
 def count_ingestable_files(
     root: Path,
     *,
-    include_exts: Optional[Iterable[str]] = None,
+    include_exts: Iterable[str] | None = None,
     extra_excludes: Iterable[str] = (),
 ) -> int:
     """Pre-walk count for progress bars + safety prompts. Cheap (no read)."""
     root = root.resolve()
-    include_set: Set[str] = (
+    include_set: set[str] = (
         set(include_exts) if include_exts is not None else set(DEFAULT_INCLUDE_EXTS)
     )
     excludes = set(DEFAULT_EXCLUDES) | set(extra_excludes)
@@ -357,8 +358,8 @@ def count_ingestable_files(
 
 def _walk(
     root: Path,
-    include_exts: Set[str],
-    excludes: Set[str],
+    include_exts: set[str],
+    excludes: set[str],
 ) -> Iterable[Path]:
     """Yield every file under ``root`` whose extension is in ``include_exts``,
     skipping any directory whose name matches an entry in ``excludes`` and any
@@ -384,7 +385,7 @@ def _walk(
 
 def _chunk_text(
     text: str, *, chunk_lines: int = 80, overlap: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Split ``text`` into overlapping line-windows.
 
     Returns a list of dicts: ``{"content": str, "line_start": 1-based,
@@ -403,7 +404,7 @@ def _chunk_text(
         return []
 
     step = max(1, chunk_lines - overlap)
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     i = 0
     while i < n:
         j = min(n, i + chunk_lines)
@@ -421,9 +422,9 @@ def _chunk_text(
 
 
 def _flush_batch(
-    pending: List[Tuple[ChunkCreate, str]],
+    pending: list[tuple[ChunkCreate, str]],
     storage: Storage,
-    provider: Optional[EmbeddingProvider],
+    provider: EmbeddingProvider | None,
     stats: IngestStats,
     *,
     dry_run: bool,
@@ -467,7 +468,7 @@ def _flush_batch(
         existing_hash_by_key = {}
 
     # ---- 2. Partition ----
-    changed_indices: List[int] = []
+    changed_indices: list[int] = []
     for i, (chunk_create, content_hash) in enumerate(pending):
         key = (chunk_create.source_path,
                chunk_create.line_start, chunk_create.line_end)
@@ -477,7 +478,7 @@ def _flush_batch(
     stats.chunks_unchanged += n_unchanged
 
     # ---- 3. Embed only the changed subset ----
-    embeddings_by_idx: Dict[int, bytes] = {}
+    embeddings_by_idx: dict[int, bytes] = {}
     if changed_indices and provider is not None:
         try:
             texts = [pending[i][0].content for i in changed_indices]
@@ -535,7 +536,7 @@ def _prune_missing(
     storage: Storage,
     scope_id: str,
     source_root: str,
-    seen: Set[Tuple[str, str]],
+    seen: set[tuple[str, str]],
 ) -> int:
     """Delete chunks whose (source_root, source_path) wasn't seen this run.
 

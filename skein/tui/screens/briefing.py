@@ -5,7 +5,7 @@ fragment counts by type, recent decisions, daemon stats, recommended action.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 from textual import work
 from textual.app import ComposeResult
@@ -20,7 +20,7 @@ class BriefingPane(Container):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._client: Optional[DaemonClient] = None
+        self._client: DaemonClient | None = None
         self._scope: str = ""
 
     def compose(self) -> ComposeResult:
@@ -53,7 +53,7 @@ class BriefingPane(Container):
         action = self.query_one("#briefing-action", Static)
 
         try:
-            briefing: Dict[str, Any] = await self._client.briefing(self._scope)
+            briefing: dict[str, Any] = await self._client.briefing(self._scope)
         except Exception as e:
             header.update(f"[bold]Skein — {self._scope}[/bold]")
             stats.update(

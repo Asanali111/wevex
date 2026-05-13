@@ -5,14 +5,12 @@ app.dependency_overrides.
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from .embeddings import EmbeddingProvider, get_provider
 from .storage import Storage
 
 # Module-level singletons (initialised by server.py on startup)
-_storage: Optional[Storage] = None
-_provider: Optional[EmbeddingProvider] = None
+_storage: Storage | None = None
+_provider: EmbeddingProvider | None = None
 
 
 def set_storage(storage: Storage) -> None:

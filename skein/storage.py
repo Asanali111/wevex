@@ -15,15 +15,24 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from .models import (
-    Chunk, ChunkCreate,
-    Commit, CommitCreate,
-    Fragment, FragmentCreate, FragmentUpdate,
-    Identity, IdentityCreate,
-    Lease, LeaseCreate,
-    Scope, ScopeCreate, ScopeMembership, ScopeMembershipCreate,
+    Chunk,
+    ChunkCreate,
+    Commit,
+    CommitCreate,
+    Fragment,
+    FragmentCreate,
+    FragmentUpdate,
+    Identity,
+    IdentityCreate,
+    Lease,
+    LeaseCreate,
+    Scope,
+    ScopeCreate,
+    ScopeMembership,
+    ScopeMembershipCreate,
 )
 
 logger = logging.getLogger("skein.storage")
@@ -120,7 +129,7 @@ class Storage:
     # ------------------------------------------------------------------
 
     def upsert_mcp_client(self, token_prefix: str, client_name: str,
-                          display_name: Optional[str] = None) -> None:
+                          display_name: str | None = None) -> None:
         """Register or update the client for this token prefix."""
         self._conn.execute(
             """INSERT INTO mcp_clients (token_prefix, client_name, display_name, created_at)
@@ -131,7 +140,7 @@ class Storage:
             (token_prefix, client_name, display_name),
         )
 
-    def get_client_for_token_prefix(self, token_prefix: str) -> Optional[str]:
+    def get_client_for_token_prefix(self, token_prefix: str) -> str | None:
         """Return the registered client_name for this token prefix, or None."""
         row = self._conn.execute(
             "SELECT client_name FROM mcp_clients WHERE token_prefix = ?",
@@ -139,7 +148,7 @@ class Storage:
         ).fetchone()
         return row["client_name"] if row else None
 
-    def list_mcp_clients(self) -> List[Dict[str, Any]]:
+    def list_mcp_clients(self) -> list[dict[str, Any]]:
         """All registered clients, newest first. Used by `skein clients`."""
         rows = self._conn.execute(
             "SELECT token_prefix, client_name, display_name, created_at "
@@ -156,11 +165,11 @@ class Storage:
     def add_extraction_candidate(
         self, *, scope_id: str, content: str, type: str,
         confidence: float, source_tool: str,
-        territory: Optional[str] = None, tags: Optional[List[str]] = None,
-        source_session_id: Optional[str] = None,
-        source_file: Optional[str] = None,
-        source_message_ts: Optional[str] = None,
-    ) -> Optional[str]:
+        territory: str | None = None, tags: list[str] | None = None,
+        source_session_id: str | None = None,
+        source_file: str | None = None,
+        source_message_ts: str | None = None,
+    ) -> str | None:
         """Insert a pending candidate. Returns the new id, or None if a
         duplicate already exists (dedup is by scope_id + content + source_tool).
         """
@@ -182,11 +191,11 @@ class Storage:
             return None
 
     def list_extraction_candidates(
-        self, *, status: str = "pending", scope_id: Optional[str] = None,
+        self, *, status: str = "pending", scope_id: str | None = None,
         limit: int = 50, offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         conditions = ["status = ?"]
-        params: List[Any] = [status]
+        params: list[Any] = [status]
         if scope_id:
             conditions.append("scope_id = ?")
             params.append(scope_id)
@@ -199,7 +208,7 @@ class Storage:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_extraction_candidate(self, candidate_id: str) -> Optional[Dict[str, Any]]:
+    def get_extraction_candidate(self, candidate_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
             "SELECT * FROM extraction_candidates WHERE id = ?", (candidate_id,),
         ).fetchone()
@@ -207,7 +216,7 @@ class Storage:
 
     def mark_candidate_status(
         self, candidate_id: str, status: str,
-        promoted_fragment_id: Optional[str] = None,
+        promoted_fragment_id: str | None = None,
     ) -> bool:
         n = self._conn.execute(
             "UPDATE extraction_candidates SET status = ?, reviewed_at = datetime('now'), "
@@ -263,7 +272,7 @@ class Storage:
             row["name"]
             for row in self._conn.execute("PRAGMA table_info(fragments)")
         }
-        wanted: List[tuple] = [
+        wanted: list[tuple] = [
             ("created_by_tool",          "TEXT"),
             ("created_in_session_id",    "TEXT"),
             ("created_against_commit",   "TEXT"),
@@ -298,7 +307,7 @@ class Storage:
         )
         return identity
 
-    def get_identity(self, id_or_handle: str) -> Optional[Identity]:
+    def get_identity(self, id_or_handle: str) -> Identity | None:
         row = self._conn.execute(
             "SELECT * FROM identities WHERE id = ? OR handle = ? LIMIT 1",
             (id_or_handle, id_or_handle),
@@ -319,7 +328,7 @@ class Storage:
                 return again
             raise
 
-    def list_identities(self, limit: int = 100, offset: int = 0) -> List[Identity]:
+    def list_identities(self, limit: int = 100, offset: int = 0) -> list[Identity]:
         rows = self._conn.execute(
             "SELECT * FROM identities ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (limit, offset),
@@ -343,7 +352,7 @@ class Storage:
         )
         return scope
 
-    def get_scope(self, id_or_handle: str) -> Optional[Scope]:
+    def get_scope(self, id_or_handle: str) -> Scope | None:
         row = self._conn.execute(
             "SELECT * FROM scopes WHERE id = ? OR handle = ? LIMIT 1",
             (id_or_handle, id_or_handle),
@@ -356,8 +365,8 @@ class Storage:
             return existing
         return self.create_scope(data)
 
-    def list_scopes(self, owner_id: Optional[str] = None,
-                    limit: int = 100, offset: int = 0) -> List[Scope]:
+    def list_scopes(self, owner_id: str | None = None,
+                    limit: int = 100, offset: int = 0) -> list[Scope]:
         if owner_id:
             rows = self._conn.execute(
                 "SELECT * FROM scopes WHERE owner_id = ? ORDER BY created_at DESC "
@@ -374,9 +383,9 @@ class Storage:
     def count_scopes(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM scopes").fetchone()[0]
 
-    def get_scope_lineage(self, handle: str) -> List[Scope]:
+    def get_scope_lineage(self, handle: str) -> list[Scope]:
         """Return the scope and all its ancestors (self included), nearest first."""
-        lineage: List[Scope] = []
+        lineage: list[Scope] = []
         current = self.get_scope(handle)
         while current:
             lineage.append(current)
@@ -401,13 +410,13 @@ class Storage:
     # ------------------------------------------------------------------
 
     def create_fragment(self, data: FragmentCreate, *,
-                         commit_id: Optional[str] = None,
-                         embedding: Optional[bytes] = None) -> Fragment:
+                         commit_id: str | None = None,
+                         embedding: bytes | None = None) -> Fragment:
         frag_id = _new_id()
         now = _now_iso()
 
         # Calculate expires_at if TTL is set
-        expires_at: Optional[str] = None
+        expires_at: str | None = None
         permanent = False
         if data.ttl_seconds is None:
             permanent = True
@@ -490,7 +499,7 @@ class Storage:
                 code="VERSION_CONFLICT",
             )
 
-        updates: Dict[str, Any] = {}
+        updates: dict[str, Any] = {}
         if data.content is not None:
             updates["content"] = data.content
         if data.confidence is not None:
@@ -510,7 +519,7 @@ class Storage:
         updates["updated_at"] = _now_iso()
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
-        values = list(updates.values()) + [frag_id, current_version]
+        values = [*list(updates.values()), frag_id, current_version]
         n = self._conn.execute(
             f"UPDATE fragments SET {set_clause} "
             f"WHERE id = ? AND version = ?",
@@ -525,7 +534,7 @@ class Storage:
 
         return self.get_fragment(frag_id)  # type: ignore[return-value]
 
-    def get_fragment(self, frag_id: str) -> Optional[Fragment]:
+    def get_fragment(self, frag_id: str) -> Fragment | None:
         row = self._conn.execute(
             "SELECT * FROM fragments WHERE id = ?", (frag_id,)
         ).fetchone()
@@ -540,15 +549,15 @@ class Storage:
         ).rowcount
         return n > 0
 
-    def list_fragments(self, scope_id: Optional[str] = None,
-                        type_filter: Optional[str] = None,
+    def list_fragments(self, scope_id: str | None = None,
+                        type_filter: str | None = None,
                         include_stale: bool = False,
                         limit: int = 50,
                         offset: int = 0,
-                        since: Optional[str] = None,
-                        exclude_tool: Optional[str] = None) -> List[Fragment]:
+                        since: str | None = None,
+                        exclude_tool: str | None = None) -> list[Fragment]:
         conditions = ["1=1"]
-        params: List[Any] = []
+        params: list[Any] = []
 
         if scope_id:
             conditions.append("scope_id = ?")
@@ -574,7 +583,7 @@ class Storage:
         rows = self._conn.execute(
             f"SELECT * FROM fragments WHERE {where} ORDER BY created_at DESC "
             f"LIMIT ? OFFSET ?",
-            params + [limit, offset],
+            [*params, limit, offset],
         ).fetchall()
         return [_row_to_fragment(r) for r in rows]
 
@@ -602,7 +611,7 @@ class Storage:
 
     def count_fragments_by_type(
         self, scope_id: str, include_stale: bool = False,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Return ``{type: count}`` for a scope in a single SQL round-trip.
 
         Powers the `project_briefing` MCP tool / `/v1/briefing` endpoint.
@@ -626,7 +635,7 @@ class Storage:
             ).fetchall()
         return {row["type"]: int(row["c"]) for row in rows}
 
-    def get_fragment_embedding(self, frag_id: str) -> Optional[bytes]:
+    def get_fragment_embedding(self, frag_id: str) -> bytes | None:
         row = self._conn.execute(
             "SELECT content_embedding FROM fragments WHERE id = ?", (frag_id,)
         ).fetchone()
@@ -640,7 +649,7 @@ class Storage:
             (embedding_bytes, frag_id),
         )
 
-    def get_fragments_without_embeddings(self, limit: int = 100) -> List[Fragment]:
+    def get_fragments_without_embeddings(self, limit: int = 100) -> list[Fragment]:
         rows = self._conn.execute(
             "SELECT * FROM fragments WHERE content_embedding IS NULL "
             "AND is_stale = 0 ORDER BY created_at LIMIT ?",
@@ -652,10 +661,10 @@ class Storage:
     # Keyword search (FTS5 BM25)
     # ------------------------------------------------------------------
 
-    def keyword_search(self, query: str, scope_ids: List[str],
-                        type_filter: Optional[List[str]] = None,
+    def keyword_search(self, query: str, scope_ids: list[str],
+                        type_filter: list[str] | None = None,
                         include_stale: bool = False,
-                        limit: int = 20) -> List[Tuple[str, float]]:
+                        limit: int = 20) -> list[tuple[str, float]]:
         """Return (fragment_id, bm25_score) pairs ordered by relevance.
 
         BM25 score from FTS5 is negative (more negative = more relevant).
@@ -666,7 +675,7 @@ class Storage:
 
         placeholders = ",".join("?" * len(scope_ids))
         type_filter_clause = ""
-        type_params: List[Any] = []
+        type_params: list[Any] = []
         if type_filter:
             tp = ",".join("?" * len(type_filter))
             type_filter_clause = f"AND f.type IN ({tp})"
@@ -689,7 +698,7 @@ class Storage:
             ORDER BY bm25(fragments_fts)
             LIMIT ?
             """,
-            [_fts_escape(query)] + scope_ids + type_params + [limit],
+            [_fts_escape(query), *scope_ids, *type_params, limit],
         ).fetchall()
         return [(row[0], float(row[1])) for row in rows]
 
@@ -697,18 +706,17 @@ class Storage:
     # Vector search (cosine, Python-side)
     # ------------------------------------------------------------------
 
-    def vector_search(self, query_vec_bytes: bytes, scope_ids: List[str],
-                       type_filter: Optional[List[str]] = None,
+    def vector_search(self, query_vec_bytes: bytes, scope_ids: list[str],
+                       type_filter: list[str] | None = None,
                        include_stale: bool = False,
                        limit: int = 20,
-                       dimension: int = 768) -> List[Tuple[str, float]]:
+                       dimension: int = 768) -> list[tuple[str, float]]:
         """Return (fragment_id, cosine_similarity) ordered by score.
 
         Loads all embeddings for the scope into memory and computes cosine
         similarity Python-side.  This is fine at <50k fragments; add ANN
         indexing (e.g. usearch or sqlite-vec) for larger datasets.
         """
-        import numpy as np
         from .embeddings import bytes_to_vec, cosine_similarity
 
         if not scope_ids:
@@ -716,7 +724,7 @@ class Storage:
 
         placeholders = ",".join("?" * len(scope_ids))
         type_filter_clause = ""
-        type_params: List[Any] = []
+        type_params: list[Any] = []
         if type_filter:
             tp = ",".join("?" * len(type_filter))
             type_filter_clause = f"AND type IN ({tp})"
@@ -740,7 +748,7 @@ class Storage:
             return []
 
         query_vec = bytes_to_vec(query_vec_bytes, dimension)
-        scored: List[Tuple[str, float]] = []
+        scored: list[tuple[str, float]] = []
         for row in rows:
             frag_vec = bytes_to_vec(row[1], dimension)
             sim = cosine_similarity(query_vec, frag_vec)
@@ -770,14 +778,14 @@ class Storage:
         )
         return commit
 
-    def get_commit(self, commit_id: str) -> Optional[Commit]:
+    def get_commit(self, commit_id: str) -> Commit | None:
         row = self._conn.execute(
             "SELECT * FROM commits WHERE id = ?", (commit_id,)
         ).fetchone()
         return _row_to_commit(row) if row else None
 
-    def list_commits(self, scope_id: Optional[str] = None,
-                      limit: int = 50, offset: int = 0) -> List[Commit]:
+    def list_commits(self, scope_id: str | None = None,
+                      limit: int = 50, offset: int = 0) -> list[Commit]:
         if scope_id:
             rows = self._conn.execute(
                 "SELECT * FROM commits WHERE scope_id = ? "
@@ -816,7 +824,7 @@ class Storage:
             acquired_at=now_iso, expires_at=expires_at,
         )
 
-    def get_lease(self, lease_id: str) -> Optional[Lease]:
+    def get_lease(self, lease_id: str) -> Lease | None:
         row = self._conn.execute(
             "SELECT * FROM leases WHERE id = ?", (lease_id,)
         ).fetchone()
@@ -829,10 +837,10 @@ class Storage:
         ).rowcount
         return n > 0
 
-    def list_leases(self, scope_id: Optional[str] = None,
-                     active_only: bool = True) -> List[Lease]:
+    def list_leases(self, scope_id: str | None = None,
+                     active_only: bool = True) -> list[Lease]:
         conditions = ["1=1"]
-        params: List[Any] = []
+        params: list[Any] = []
         if scope_id:
             conditions.append("scope_id = ?")
             params.append(scope_id)
@@ -854,7 +862,7 @@ class Storage:
             logger.debug("Cleaned up %d expired leases", n)
         return n
 
-    def check_lease_conflict(self, scope_id: str, glob: str) -> Optional[Lease]:
+    def check_lease_conflict(self, scope_id: str, glob: str) -> Lease | None:
         """Return an active conflicting lease (glob overlap) if one exists."""
         # Simple substring match — for exact overlaps.
         # Full glob-vs-glob overlap detection would require fnmatch iteration.
@@ -879,7 +887,7 @@ class Storage:
 
     def upsert_chunk(self, data: ChunkCreate, *,
                      content_hash: str,
-                     embedding: Optional[bytes] = None) -> tuple[Chunk, str]:
+                     embedding: bytes | None = None) -> tuple[Chunk, str]:
         """Insert/update a chunk keyed by (scope, root, path, line range).
 
         Returns ``(chunk, status)`` where ``status`` is one of:
@@ -933,19 +941,19 @@ class Storage:
             metadata=data.metadata, created_at=now,
         ), "inserted"
 
-    def get_chunk(self, chunk_id: str) -> Optional[Chunk]:
+    def get_chunk(self, chunk_id: str) -> Chunk | None:
         return self._get_chunk_by_id(chunk_id)
 
-    def _get_chunk_by_id(self, chunk_id: str) -> Optional[Chunk]:
+    def _get_chunk_by_id(self, chunk_id: str) -> Chunk | None:
         row = self._conn.execute(
             "SELECT * FROM chunks WHERE id = ?", (chunk_id,)
         ).fetchone()
         return _row_to_chunk(row) if row else None
 
-    def list_chunks(self, scope_id: Optional[str] = None,
-                     source_root: Optional[str] = None,
-                     language: Optional[str] = None,
-                     limit: int = 50, offset: int = 0) -> List[Chunk]:
+    def list_chunks(self, scope_id: str | None = None,
+                     source_root: str | None = None,
+                     language: str | None = None,
+                     limit: int = 50, offset: int = 0) -> list[Chunk]:
         conditions, params = ["1=1"], []
         if scope_id:
             conditions.append("scope_id = ?")
@@ -960,7 +968,7 @@ class Storage:
         rows = self._conn.execute(
             f"SELECT * FROM chunks WHERE {where} "
             f"ORDER BY source_path, line_start LIMIT ? OFFSET ?",
-            params + [limit, offset],
+            [*params, limit, offset],
         ).fetchall()
         return [_row_to_chunk(r) for r in rows]
 
@@ -971,9 +979,9 @@ class Storage:
         ).rowcount
         return n
 
-    def chunk_stats(self, scope_id: Optional[str] = None) -> Dict[str, Any]:
+    def chunk_stats(self, scope_id: str | None = None) -> dict[str, Any]:
         scope_clause = ""
-        params: List[Any] = []
+        params: list[Any] = []
         if scope_id:
             scope_clause = "WHERE scope_id = ?"
             params = [scope_id]
@@ -1001,7 +1009,7 @@ class Storage:
             "by_root": by_root,
         }
 
-    def get_chunks_by_ids(self, ids: List[str]) -> Dict[str, Chunk]:
+    def get_chunks_by_ids(self, ids: list[str]) -> dict[str, Chunk]:
         if not ids:
             return {}
         placeholders = ",".join("?" * len(ids))
@@ -1014,8 +1022,8 @@ class Storage:
         self,
         scope_id: str,
         source_root: str,
-        keys: List[Tuple[str, int, int]],
-    ) -> Dict[Tuple[str, int, int], str]:
+        keys: list[tuple[str, int, int]],
+    ) -> dict[tuple[str, int, int], str]:
         """Bulk lookup of existing chunk content_hashes.
 
         Used by ingest to decide which chunks in a batch are unchanged
@@ -1028,7 +1036,7 @@ class Storage:
         or_clauses = " OR ".join(
             ["(source_path = ? AND line_start = ? AND line_end = ?)"] * len(keys)
         )
-        flat: List[Any] = [scope_id, source_root]
+        flat: list[Any] = [scope_id, source_root]
         for k in keys:
             flat.extend(k)
         rows = self._conn.execute(
@@ -1054,11 +1062,11 @@ class Storage:
         self._conn.execute("ROLLBACK")
 
     def chunks_keyword_search(
-        self, query: str, scope_ids: List[str], *,
-        languages: Optional[List[str]] = None,
-        source_root: Optional[str] = None,
+        self, query: str, scope_ids: list[str], *,
+        languages: list[str] | None = None,
+        source_root: str | None = None,
         limit: int = 30,
-    ) -> List[Tuple[str, float]]:
+    ) -> list[tuple[str, float]]:
         if not scope_ids:
             return []
         scope_placeholders = ",".join("?" * len(scope_ids))
@@ -1081,18 +1089,18 @@ class Storage:
                   {root_clause}
                 ORDER BY bm25(chunks_fts)
                 LIMIT ?""",
-            [_fts_escape(query)] + scope_ids + lang_params + root_params + [limit],
+            [_fts_escape(query), *scope_ids, *lang_params, *root_params, limit],
         ).fetchall()
         return [(r[0], float(r[1])) for r in rows]
 
     def chunks_vector_search(
-        self, query_vec_bytes: bytes, scope_ids: List[str], *,
-        languages: Optional[List[str]] = None,
-        source_root: Optional[str] = None,
+        self, query_vec_bytes: bytes, scope_ids: list[str], *,
+        languages: list[str] | None = None,
+        source_root: str | None = None,
         limit: int = 30,
         dimension: int = 768,
         batch_size: int = 5000,
-    ) -> List[Tuple[str, float]]:
+    ) -> list[tuple[str, float]]:
         """Brute-force cosine search, batched to bound memory.
 
         Streams rows in ``batch_size`` chunks and keeps a heap of top ``limit``.
@@ -1100,7 +1108,9 @@ class Storage:
         dims that's ~15 MB per batch — fine on any laptop.
         """
         import heapq
+
         import numpy as np
+
         from .embeddings import bytes_to_vec
 
         if not scope_ids:
@@ -1134,7 +1144,7 @@ class Storage:
         )
 
         # min-heap of size <= limit: (score, id)
-        heap: List[Tuple[float, str]] = []
+        heap: list[tuple[float, str]] = []
         while True:
             rows = cur.fetchmany(batch_size)
             if not rows:
@@ -1155,7 +1165,7 @@ class Storage:
 
         return sorted(((cid, float(s)) for s, cid in heap), key=lambda x: -x[1])
 
-    def count_chunks(self, scope_id: Optional[str] = None) -> int:
+    def count_chunks(self, scope_id: str | None = None) -> int:
         if scope_id:
             return self._conn.execute(
                 "SELECT COUNT(*) FROM chunks WHERE scope_id = ?", (scope_id,),
@@ -1180,7 +1190,7 @@ class Storage:
     # Stats
     # ------------------------------------------------------------------
 
-    def stats(self) -> Dict[str, int]:
+    def stats(self) -> dict[str, int]:
         return {
             "fragments": self.count_fragments(),
             "fragments_stale": self._conn.execute(
@@ -1198,7 +1208,7 @@ class Storage:
     # Raw access (for retrieval module)
     # ------------------------------------------------------------------
 
-    def get_fragments_by_ids(self, ids: List[str]) -> Dict[str, Fragment]:
+    def get_fragments_by_ids(self, ids: list[str]) -> dict[str, Fragment]:
         if not ids:
             return {}
         placeholders = ",".join("?" * len(ids))
@@ -1333,7 +1343,7 @@ def _glob_overlaps(a: str, b: str) -> bool:
     Compares path *segments*, not raw strings — so ``"a/bc/**"`` does NOT
     falsely overlap ``"a/b/**"`` the way naive ``startswith`` did.
     """
-    def _segments(g: str) -> List[str]:
+    def _segments(g: str) -> list[str]:
         # Strip any trailing wildcards and slashes, then split into segments.
         base = g
         while base and base[-1] in "/*":

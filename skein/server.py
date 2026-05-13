@@ -16,11 +16,9 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from .config import SkeinConfig, get_config
 from .dependencies import set_provider, set_storage
@@ -42,7 +40,7 @@ logger = logging.getLogger("skein.server")
 # ---------------------------------------------------------------------------
 # Daemon uptime tracker (set in lifespan, read by /v1/briefing + MCP briefing)
 # ---------------------------------------------------------------------------
-_DAEMON_STARTED_AT: Optional[float] = None
+_DAEMON_STARTED_AT: float | None = None
 
 
 def get_daemon_uptime_seconds() -> int:
@@ -80,8 +78,8 @@ async def lifespan(app: FastAPI):
 
     # Common setup for the two passive watchers — both need their own SQLite
     # handle per poll and the local-user identity.
-    from .models import IdentityCreate
     from .auth import token_prefix as _tp
+    from .models import IdentityCreate
 
     def _storage_factory():
         return Storage(cfg.db_path)
@@ -142,7 +140,7 @@ async def lifespan(app: FastAPI):
     logger.info("Storage closed.")
 
 
-def create_app(cfg: Optional[SkeinConfig] = None) -> FastAPI:
+def create_app(cfg: SkeinConfig | None = None) -> FastAPI:
     if cfg is None:
         cfg = get_config()
 

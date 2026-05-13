@@ -5,15 +5,11 @@ don't silently re-introduce noise into the prompt-injection path.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
-
-import pytest
 
 from skein import hooks as hooks_mod
 from skein.agents_md import _extract_user_block, render_agents_md
 from skein.scope_resolver import _is_non_project_dir, auto_detect_scope
-
 
 # ---------------------------------------------------------------------------
 # Scope auto-detect — refuse $HOME-named scopes
@@ -88,8 +84,8 @@ class TestUserBlockExtractor:
 
     def test_idempotent_round_trip(self, tmp_path):
         """Run sync 5× in a row; AGENTS.md should stay constant size."""
-        from skein.storage import Storage
         from skein.models import IdentityCreate, ScopeCreate
+        from skein.storage import Storage
 
         s = Storage(str(tmp_path / "test.db"))
         owner = s.create_identity(IdentityCreate(
@@ -101,7 +97,7 @@ class TestUserBlockExtractor:
         ))
 
         prev_text = ""
-        for i in range(5):
+        for _i in range(5):
             text = render_agents_md(
                 "project:agents-md-test", s,
                 daemon_url="http://127.0.0.1:8765",
@@ -199,8 +195,8 @@ class TestRenderGrouped:
 
 class TestCountFragmentsInScope:
     def test_returns_zero_for_new_scope(self, tmp_path):
-        from skein.storage import Storage
         from skein.models import IdentityCreate, ScopeCreate
+        from skein.storage import Storage
 
         s = Storage(str(tmp_path / "test.db"))
         owner = s.create_identity(IdentityCreate(
@@ -227,8 +223,8 @@ class TestIngestFastPath:
         return repo
 
     def _build_storage_with_scope(self, tmp_path: Path):
-        from skein.storage import Storage
         from skein.models import IdentityCreate, ScopeCreate
+        from skein.storage import Storage
         s = Storage(str(tmp_path / "ingest.db"))
         owner = s.create_identity(IdentityCreate(
             handle="user:i", type="user", name="i",
@@ -243,8 +239,8 @@ class TestIngestFastPath:
         """If every chunk in a batch is unchanged, the provider's embed()
         must NOT be called. This is the 20–50× win on re-ingest with
         Gemini."""
-        from skein.ingest import ingest_directory
         from skein.embeddings import HashEmbeddingProvider
+        from skein.ingest import ingest_directory
 
         repo = self._build_repo(tmp_path)
         storage, scope = self._build_storage_with_scope(tmp_path)
@@ -278,8 +274,8 @@ class TestIngestFastPath:
 
     def test_changed_chunk_triggers_embed_only_for_that_chunk(self, tmp_path):
         """One file changed → only its chunks should reach embed()."""
-        from skein.ingest import ingest_directory
         from skein.embeddings import HashEmbeddingProvider
+        from skein.ingest import ingest_directory
 
         repo = self._build_repo(tmp_path, n_files=5)
         storage, scope = self._build_storage_with_scope(tmp_path)

@@ -14,10 +14,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional, Tuple
 
 
-def auto_detect_scope(start: Optional[Path] = None) -> str:
+def auto_detect_scope(start: Path | None = None) -> str:
     """Best-guess scope handle for a project directory.
 
     Priority:
@@ -83,7 +82,7 @@ def _clean_handle_part(s: str) -> str:
     return cleaned or "default"
 
 
-def find_scope_pin(start: Optional[Path] = None) -> Optional[str]:
+def find_scope_pin(start: Path | None = None) -> str | None:
     """Walk up from ``start`` (or cwd) looking for a ``.skein/scope`` file.
 
     Returns the pinned scope handle, or None if no pin file is found.
@@ -102,11 +101,11 @@ def find_scope_pin(start: Optional[Path] = None) -> Optional[str]:
 
 
 def resolve_scope(
-    cli_scope: Optional[str] = None,
+    cli_scope: str | None = None,
     *,
-    config_default: Optional[str] = None,
-    start: Optional[Path] = None,
-) -> Tuple[str, str]:
+    config_default: str | None = None,
+    start: Path | None = None,
+) -> tuple[str, str]:
     """Resolve the scope to use, plus a one-word source label for telemetry.
 
     Returns ``(scope_handle, source)`` where ``source`` is one of:

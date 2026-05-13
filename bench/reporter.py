@@ -1,11 +1,10 @@
 """Render a BenchmarkReport as a markdown report."""
 from __future__ import annotations
 
-from typing import Iterable, List
+from collections.abc import Iterable
 
 from .runner import BenchmarkReport
 from .scenarios import ScenarioResult
-
 
 _STATUS_GLYPH = {
     "pass": "PASS", "warn": "WARN", "fail": "FAIL",
@@ -22,7 +21,7 @@ def _fmt_num(v: float) -> str:
 
 
 def render_markdown(report: BenchmarkReport) -> str:
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append(f"# Context-bus benchmark report — `{report.adapter_name}`")
     lines.append("")
     lines.append(f"**Overall status:** `{report.overall_status.upper()}`  ")
@@ -67,8 +66,8 @@ def _group_by_category(scenarios: Iterable[ScenarioResult]) -> dict:
     return out
 
 
-def _render_scenarios(scenarios: List[ScenarioResult], report: BenchmarkReport) -> List[str]:
-    lines: List[str] = []
+def _render_scenarios(scenarios: list[ScenarioResult], report: BenchmarkReport) -> list[str]:
+    lines: list[str] = []
     for s in scenarios:
         glyph = _STATUS_GLYPH.get(s.status, s.status)
         header = f"### [{glyph}] `{s.name}`"

@@ -11,8 +11,6 @@ a strict allow-list will have great precision and terrible recall.
 """
 from __future__ import annotations
 
-from typing import List
-
 from ..adapter import MutableAdapter
 from ..corpus import commits
 from ..scenarios import ScenarioResult
@@ -35,7 +33,7 @@ def measure_auto_capture_quality(adapter: MutableAdapter) -> ScenarioResult:
         )
 
     tp = fp = tn = fn = 0
-    disagreements: List[dict] = []
+    disagreements: list[dict] = []
 
     for c in commits():
         predicted = adapter.would_capture_commit(c["subject"], c.get("body", ""))

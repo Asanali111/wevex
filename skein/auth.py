@@ -20,8 +20,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
-from functools import lru_cache
-from typing import Optional
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -72,8 +70,8 @@ class AuthContext:
 
 async def get_auth(
     request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
-    x_skein_agent: Optional[str] = Header(None, alias="X-Skein-Agent"),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    x_skein_agent: str | None = Header(None, alias="X-Skein-Agent"),
 ) -> AuthContext:
     """FastAPI dependency — validates bearer token and returns AuthContext."""
     from .config import get_config
@@ -83,7 +81,7 @@ async def get_auth(
 
     # Bearer token via Authorization header only — query params would leak the
     # credential into proxy/CDN access logs and shell history.
-    raw_token: Optional[str] = None
+    raw_token: str | None = None
     if credentials and credentials.scheme.lower() == "bearer":
         raw_token = credentials.credentials
 

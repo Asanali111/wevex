@@ -1,16 +1,17 @@
 """REST router: /v1/fragments — CRUD + recall (hybrid search)."""
 from __future__ import annotations
 
-from typing import List, Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..auth import AuthContext, RequireAuth
 from ..dependencies import get_provider, get_storage
 from ..embeddings import EmbeddingProvider, vec_to_bytes
 from ..models import (
-    Fragment, FragmentCreate, FragmentUpdate,
-    RecallRequest, RecallResponse,
+    Fragment,
+    FragmentCreate,
+    FragmentUpdate,
+    RecallRequest,
+    RecallResponse,
 )
 from ..retrieval import recall
 from ..storage import ConflictError, Storage
@@ -37,7 +38,7 @@ def create_fragment(
     data.owner_id = auth.user_id
 
     # Embed in the background (best-effort; fragment is created even if embedding fails)
-    embedding_bytes: Optional[bytes] = None
+    embedding_bytes: bytes | None = None
     try:
         vec = provider.embed_one(data.content)
         embedding_bytes = vec_to_bytes(vec)
@@ -56,7 +57,6 @@ def create_fragment(
     frag = storage.create_fragment(data, commit_id=commit.id, embedding=embedding_bytes)
 
     # Back-fill commit's fragments_added
-    from ..models import CommitCreate as _CC
     storage._conn.execute(
         "UPDATE commits SET fragments_added = ? WHERE id = ?",
         (f'["{frag.id}"]', commit.id),
@@ -65,19 +65,19 @@ def create_fragment(
     return frag
 
 
-@router.get("", response_model=List[Fragment])
+@router.get("", response_model=list[Fragment])
 def list_fragments(
-    scope: Optional[str] = Query(None, description="Scope handle or ID"),
-    type: Optional[str] = Query(None, description="Filter by fragment type"),
+    scope: str | None = Query(None, description="Scope handle or ID"),
+    type: str | None = Query(None, description="Filter by fragment type"),
     include_stale: bool = False,
     limit: int = Query(50, ge=1, le=200),
     offset: int = 0,
-    since: Optional[str] = Query(None, description="ISO 8601 timestamp; only return fragments created after this time"),
-    exclude_tool: Optional[str] = Query(None, description="Exclude fragments whose created_by_tool equals this value"),
+    since: str | None = Query(None, description="ISO 8601 timestamp; only return fragments created after this time"),
+    exclude_tool: str | None = Query(None, description="Exclude fragments whose created_by_tool equals this value"),
     auth: AuthContext = RequireAuth,
     storage: Storage = Depends(get_storage),
-) -> List[Fragment]:
-    scope_id: Optional[str] = None
+) -> list[Fragment]:
+    scope_id: str | None = None
     if scope:
         scope_obj = storage.get_scope(scope)
         if not scope_obj:
@@ -95,8 +95,8 @@ def list_fragments(
 def search_fragments(
     q: str = Query(..., min_length=1, description="Search query"),
     scope: str = Query(..., description="Scope handle to search within"),
-    types: Optional[str] = Query(None, description="Comma-separated fragment types"),
-    territory: Optional[str] = Query(None),
+    types: str | None = Query(None, description="Comma-separated fragment types"),
+    territory: str | None = Query(None),
     limit: int = Query(10, ge=1, le=50),
     include_stale: bool = False,
     auth: AuthContext = RequireAuth,

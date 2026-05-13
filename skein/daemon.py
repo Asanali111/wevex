@@ -24,14 +24,13 @@ from __future__ import annotations
 import logging
 import os
 import platform
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger("skein.daemon")
 
@@ -57,7 +56,7 @@ DAEMON_LOG_DIR = Path.home() / ".config" / "skein" / "logs"
 class DaemonStatus:
     running: bool
     method: str              # "launchd" | "systemd" | "nohup" | "external" | "off"
-    pid: Optional[int]
+    pid: int | None
     healthy: bool            # /health returns 200
     base_url: str
 
@@ -74,7 +73,7 @@ class DaemonStatus:
 # ---------------------------------------------------------------------------
 
 def ensure_running(*, persist: bool = True, base_url: str = "",
-                   skein_bin: Optional[str] = None) -> DaemonStatus:
+                   skein_bin: str | None = None) -> DaemonStatus:
     """Make sure the daemon is up. Idempotent.
 
     If a daemon is already responding to /health at base_url, do nothing.
@@ -143,7 +142,7 @@ def stop() -> DaemonStatus:
 
 
 def restart(*, persist: bool = True, base_url: str = "",
-            skein_bin: Optional[str] = None) -> DaemonStatus:
+            skein_bin: str | None = None) -> DaemonStatus:
     stop()
     time.sleep(0.3)
     return ensure_running(persist=persist, base_url=base_url, skein_bin=skein_bin)
@@ -197,7 +196,7 @@ def current_status(base_url: str = "") -> DaemonStatus:
 _BACKEND_CACHE_FILE = Path.home() / ".config" / "skein" / "backend"
 
 
-def _cached_backend() -> Optional[str]:
+def _cached_backend() -> str | None:
     try:
         if not _BACKEND_CACHE_FILE.exists():
             return None
@@ -309,7 +308,7 @@ def is_tcc_protected_path(p: Path) -> bool:
     return False
 
 
-def relocate_venv_to_skein_home(*, package_source: Optional[Path] = None) -> Path:
+def relocate_venv_to_skein_home(*, package_source: Path | None = None) -> Path:
     """Build a TCC-safe venv at ``~/.skein/venv`` and re-link the global ``skein``.
 
     Returns the path to the new ``skein`` binary inside the relocated venv.
@@ -414,8 +413,8 @@ def _check_health(base_url: str = "http://127.0.0.1:8765") -> bool:
     (h11 + TLS context + connection pool), and that all lands on the
     critical path of every ``skein up``. For a single one-shot GET to a
     127.0.0.1 endpoint, stdlib is plenty and pre-imported."""
-    import urllib.request
     import urllib.error
+    import urllib.request
     try:
         with urllib.request.urlopen(f"{base_url}/health", timeout=1.5) as r:
             return r.status == 200
@@ -423,7 +422,7 @@ def _check_health(base_url: str = "http://127.0.0.1:8765") -> bool:
         return False
 
 
-def _read_pid_for_backend(method: str) -> Optional[int]:
+def _read_pid_for_backend(method: str) -> int | None:
     if method == "nohup" and NOHUP_PID_FILE.exists():
         try:
             pid = int(NOHUP_PID_FILE.read_text().strip())

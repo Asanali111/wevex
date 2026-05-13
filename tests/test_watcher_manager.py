@@ -7,7 +7,6 @@ predictable PID and test the bookkeeping (PID file, slug, kill).
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 

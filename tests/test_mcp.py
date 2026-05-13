@@ -1,17 +1,13 @@
 """Tests for the hand-rolled MCP JSON-RPC handler."""
 from __future__ import annotations
 
-import json
-
-import pytest
 from fastapi.testclient import TestClient
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def mcp(client: TestClient, method: str, params: dict = None, req_id: int = 1) -> dict:
+def mcp(client: TestClient, method: str, params: dict | None = None, req_id: int = 1) -> dict:
     body = {"jsonrpc": "2.0", "id": req_id, "method": method}
     if params is not None:
         body["params"] = params
@@ -374,6 +370,7 @@ def test_mcp_recall_emits_event(client: TestClient, tmp_path, monkeypatch) -> No
     Verifies the integration between the MCP handlers and `events.log_event`.
     """
     import json as _json
+
     from skein.events import reset_event_logger
     events_path = tmp_path / "events.jsonl"
     monkeypatch.setenv("SKEIN_EVENTS_PATH", str(events_path))

@@ -7,7 +7,6 @@ chunks to land in the wrong scope.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -15,7 +14,6 @@ from click.testing import CliRunner
 from skein.cli import main as skein_cli
 from skein.config import SkeinConfig, reset_config
 from skein.dependencies import set_provider, set_storage
-from skein.embeddings import HashEmbeddingProvider
 from skein.storage import Storage
 
 

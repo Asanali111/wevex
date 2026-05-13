@@ -7,8 +7,6 @@ We capture stdout via capsys.
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 
 import pytest
 
@@ -22,7 +20,6 @@ from skein.hooks import (
     user_prompt_submit,
 )
 from skein.hooks_install import install_hooks, uninstall_hooks
-
 
 # ---------------------------------------------------------------------------
 # Fixture: configure Skein for hook tests
@@ -156,9 +153,9 @@ class TestUserPromptSubmit:
         assert capsys.readouterr().out == ""
 
     def test_with_match_emits_context(self, hook_env, capsys):
+        from skein.embeddings import HashEmbeddingProvider, vec_to_bytes
         from skein.models import FragmentCreate, IdentityCreate, ScopeCreate
         from skein.storage import Storage
-        from skein.embeddings import HashEmbeddingProvider, vec_to_bytes
 
         s = Storage(str(hook_env["db_path"]))
         provider = HashEmbeddingProvider()
@@ -199,8 +196,8 @@ class TestUserPromptSubmit:
 
 class TestStopHook:
     def test_extracts_decision_into_storage(self, hook_env):
-        from skein.storage import Storage
         from skein.models import IdentityCreate, ScopeCreate
+        from skein.storage import Storage
 
         # Pre-create scope for hook to use (avoid auto-create owner mismatch)
         s = Storage(str(hook_env["db_path"]))
@@ -242,8 +239,8 @@ class TestStopHook:
         s.close()
 
     def test_handles_message_list_format(self, hook_env):
-        from skein.storage import Storage
         from skein.models import IdentityCreate, ScopeCreate
+        from skein.storage import Storage
 
         s = Storage(str(hook_env["db_path"]))
         owner = s.create_identity(IdentityCreate(
@@ -286,8 +283,8 @@ class TestPostToolUse:
     doesn't break, but it never writes."""
 
     def test_does_not_write_observation_for_edit(self, hook_env):
-        from skein.storage import Storage
         from skein.models import IdentityCreate, ScopeCreate
+        from skein.storage import Storage
 
         s = Storage(str(hook_env["db_path"]))
         owner = s.create_identity(IdentityCreate(
@@ -336,7 +333,7 @@ class TestPostToolUse:
 
 class TestHooksInstall:
     def test_install_writes_scope_pin(self, tmp_path):
-        report = install_hooks(tmp_path, "project:test", skein_bin="skein")
+        install_hooks(tmp_path, "project:test", skein_bin="skein")
         scope_file = tmp_path / ".skein" / "scope"
         assert scope_file.exists()
         assert scope_file.read_text().strip() == "project:test"
@@ -421,7 +418,7 @@ class TestHooksInstall:
             for b in stop_hooks
         )
         # No Skein-managed entries left
-        for event_name, blocks in data.get("hooks", {}).items():
+        for _event_name, blocks in data.get("hooks", {}).items():
             assert not any(b.get("__skein_managed") for b in blocks)
 
         # Cursor rule deleted

@@ -5,8 +5,6 @@ Lives across all screens; refreshed by ``SkeinApp``'s periodic worker.
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from rich.text import Text
 from textual.reactive import reactive
 from textual.widgets import Static
@@ -17,9 +15,9 @@ class HealthHeader(Static):
 
     healthy: reactive[bool] = reactive(False)
     scope: reactive[str] = reactive("personal:scratch")
-    chunks_total: reactive[Optional[int]] = reactive(None)
-    fragment_total: reactive[Optional[int]] = reactive(None)
-    embedding_provider: reactive[Optional[str]] = reactive(None)
+    chunks_total: reactive[int | None] = reactive(None)
+    fragment_total: reactive[int | None] = reactive(None)
+    embedding_provider: reactive[str | None] = reactive(None)
 
     DEFAULT_CSS = """
     HealthHeader {

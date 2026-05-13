@@ -7,12 +7,10 @@ on _PollingWatcher cover both.
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import pytest
 
 from skein.embeddings import HashEmbeddingProvider
-from skein.models import IdentityCreate, ScopeCreate
 from skein.watcher import _PollingWatcher, _WatchdogWatcher, make_watcher
 
 

@@ -1,7 +1,7 @@
 """Help modal — shows chord shortcuts grouped by screen."""
 from __future__ import annotations
 
-from typing import ClassVar, List
+from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -38,7 +38,7 @@ _FOOTER = (
 class HelpModal(ModalScreen):
     """Floating shortcut reference; dismissed with escape, ?, or q."""
 
-    BINDINGS: ClassVar[List[Binding]] = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "dismiss", "close"),
         Binding("?", "dismiss", "close"),
         Binding("q", "dismiss", "close"),

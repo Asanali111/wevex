@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -61,7 +61,7 @@ router = APIRouter(tags=["mcp"])
 # Without this guard any local process could call remember/recall/claim_lease.
 # ---------------------------------------------------------------------------
 
-def _check_mcp_auth(request: Request) -> Optional[JSONResponse]:
+def _check_mcp_auth(request: Request) -> JSONResponse | None:
     """Return a 401/503 JSONResponse if the request is unauthenticated."""
     from .config import get_config
     cfg = get_config()
@@ -124,7 +124,7 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
 # Method dispatcher
 # ---------------------------------------------------------------------------
 
-async def _handle_one(msg: Dict[str, Any], request: Request) -> Optional[Dict]:
+async def _handle_one(msg: dict[str, Any], request: Request) -> dict | None:
     req_id = msg.get("id")
     method = msg.get("method", "")
     params = msg.get("params") or {}
@@ -148,7 +148,7 @@ async def _handle_one(msg: Dict[str, Any], request: Request) -> Optional[Dict]:
         return _error_response(req_id, -32603, "Internal error", {"detail": str(e)})
 
 
-async def _dispatch(method: str, params: Dict[str, Any], request: Request) -> Any:
+async def _dispatch(method: str, params: dict[str, Any], request: Request) -> Any:
     from .dependencies import get_provider, get_storage
 
     storage = get_storage()
@@ -229,7 +229,7 @@ def _normalize_client_name(raw: str) -> str:
     return result or "unknown"
 
 
-def _remember_initiating_client(params: Dict[str, Any], request: Request, storage: Any) -> None:
+def _remember_initiating_client(params: dict[str, Any], request: Request, storage: Any) -> None:
     """Record the (token_prefix, client_name) pairing for this connection.
 
     Reads ``params.clientInfo.name`` per MCP spec; falls back to ``"unknown"``
@@ -265,7 +265,7 @@ def _client_name_for_request(request: Request, storage: Any) -> str:
         return "unknown"
 
 
-def _handle_initialize(params: Dict) -> Dict:
+def _handle_initialize(params: dict) -> dict:
     return {
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "serverInfo": {"name": "skein", "version": "0.1.0"},
@@ -515,10 +515,10 @@ _TOOLS = [
 ]
 
 
-_GIT_HEAD_CACHE: Dict[str, tuple] = {}  # cwd → (commit_hash, expires_at)
+_GIT_HEAD_CACHE: dict[str, tuple] = {}  # cwd → (commit_hash, expires_at)
 
 
-def _resolve_git_head() -> Optional[str]:
+def _resolve_git_head() -> str | None:
     """Cheap, cached lookup of ``git rev-parse HEAD`` for the daemon's cwd.
 
     Cached for 30s — fast enough for high-frequency MCP calls without going
@@ -571,7 +571,7 @@ _BRIEFING_TYPES = ("decision", "fact", "observation", "preference",
                    "state", "requirement", "procedure", "conversation")
 
 
-def build_briefing(storage: Any, scope_handle: str) -> Dict[str, Any]:
+def build_briefing(storage: Any, scope_handle: str) -> dict[str, Any]:
     """Pure builder for the project-briefing payload.
 
     Kept transport-agnostic so the MCP handler, REST router, and tests can all
@@ -588,8 +588,8 @@ def build_briefing(storage: Any, scope_handle: str) -> Dict[str, Any]:
         # Permissive: an LLM may call briefing on a brand-new project before
         # any fragments exist. Return zeros rather than 404 — the MCP tool
         # should be safe to call from any cwd.
-        type_counts: Dict[str, int] = {}
-        recent_decisions: List[Dict[str, Any]] = []
+        type_counts: dict[str, int] = {}
+        recent_decisions: list[dict[str, Any]] = []
         fragment_total = 0
     else:
         type_counts = storage.count_fragments_by_type(scope.id)
@@ -656,20 +656,23 @@ def build_briefing(storage: Any, scope_handle: str) -> Dict[str, Any]:
 
 async def _call_tool(
     name: str,
-    args: Dict[str, Any],
+    args: dict[str, Any],
     storage: Any,
     provider: Any,
     request: Request,
-) -> Dict:
+) -> dict:
     from .auth import token_prefix
     from .config import get_config
     from .models import (
-        FragmentCreate, LeaseCreate, RecallRequest, IdentityCreate,
+        FragmentCreate,
+        IdentityCreate,
+        LeaseCreate,
+        RecallRequest,
     )
     from .retrieval import recall as do_recall
     from .storage import ConflictError
 
-    cfg = get_config()
+    get_config()
 
     # Resolve caller identity from request auth header
     auth_header = request.headers.get("Authorization", "")
@@ -1054,7 +1057,7 @@ _RESOURCE_TEMPLATES = [
 ]
 
 
-async def _read_resource(uri: str, storage: Any, request: Request) -> Dict:
+async def _read_resource(uri: str, storage: Any, request: Request) -> dict:
     from .agents_md import render_agents_md
     from .config import get_config
 
@@ -1163,7 +1166,7 @@ context. Use it eagerly.
 """
 
 
-def _build_recall_first_prompt(scope: str) -> Dict:
+def _build_recall_first_prompt(scope: str) -> dict:
     text = _RECALL_FIRST_TEXT
     if scope:
         text = (
@@ -1173,7 +1176,7 @@ def _build_recall_first_prompt(scope: str) -> Dict:
         )
     return {
         "description": (
-            f"Mandatory recall instruction"
+            "Mandatory recall instruction"
             + (f" for scope {scope!r}" if scope else "")
         ),
         "messages": [
@@ -1185,7 +1188,7 @@ def _build_recall_first_prompt(scope: str) -> Dict:
     }
 
 
-def _get_prompt(name: str, args: Dict, storage: Any) -> Dict:
+def _get_prompt(name: str, args: dict, storage: Any) -> dict:
     from .agents_md import render_agents_md
     from .config import get_config
     from .dependencies import get_provider as get_global_provider
@@ -1247,13 +1250,13 @@ def _get_prompt(name: str, args: Dict, storage: Any) -> Dict:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _tool_text(text: str) -> Dict:
+def _tool_text(text: str) -> dict:
     return {"content": [{"type": "text", "text": text}]}
 
 
 def _error_response(req_id: Any, code: int, message: str,
-                    data: Optional[Any] = None) -> Dict:
-    err: Dict[str, Any] = {"code": code, "message": message}
+                    data: Any | None = None) -> dict:
+    err: dict[str, Any] = {"code": code, "message": message}
     if data is not None:
         err["data"] = data
     return {"jsonrpc": "2.0", "id": req_id, "error": err}

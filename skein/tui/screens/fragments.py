@@ -1,7 +1,7 @@
 """Fragments pane — recall / hybrid search across the scope."""
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+from typing import Any, ClassVar
 
 from textual import work
 from textual.app import ComposeResult
@@ -17,9 +17,9 @@ class FragmentsPane(Container):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._client: Optional[DaemonClient] = None
+        self._client: DaemonClient | None = None
         self._scope: str = ""
-        self._results: List[Dict[str, Any]] = []
+        self._results: list[dict[str, Any]] = []
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="fragments-search-bar"):
@@ -111,11 +111,11 @@ class FragmentsPane(Container):
 class FragmentDetailModal(ModalScreen):
     """Read-only popup with the full fragment content and metadata."""
 
-    BINDINGS: ClassVar[List[Tuple[str, str, str]]] = [
+    BINDINGS: ClassVar[list[tuple[str, str, str]]] = [
         ("escape", "dismiss", "close"),
     ]
 
-    def __init__(self, fragment: Dict[str, Any], **kwargs: Any) -> None:
+    def __init__(self, fragment: dict[str, Any], **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._fragment = fragment
 

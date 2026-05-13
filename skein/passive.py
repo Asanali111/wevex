@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
 
 from .events import log_event
 from .models import CommitCreate, Fragment, FragmentCreate, FragmentUpdate
-from .scanner import AUTO_PROMOTE_THRESHOLD, DISCARD_THRESHOLD, ScannedFact, classify
+from .scanner import ScannedFact, classify
 from .storage import ConflictError
 
 logger = logging.getLogger("skein.passive")
@@ -80,7 +80,7 @@ def promote_scanned_facts(
             author_id=owner_id, scope_id=scope_id,
             message=f"[{source_tool}] {len(auto_facts)} auto-extracted fact(s)",
         ))
-        added_ids: List[str] = []
+        added_ids: list[str] = []
         for f in auto_facts:
             matches = _find_matches(f, by_topic, by_stem)
             if matches and all(m.content == f.content for m in matches):
@@ -98,15 +98,15 @@ def promote_scanned_facts(
             except Exception:
                 pass
 
-            supersedes_id: Optional[str] = None
-            stale_targets: List[Fragment] = []
+            supersedes_id: str | None = None
+            stale_targets: list[Fragment] = []
             if matches:
                 # Pick the most recent match for the supersede chain pointer.
                 most_recent = max(matches, key=lambda m: m.created_at)
                 supersedes_id = most_recent.id
                 stale_targets = list(matches)
 
-            metadata: Dict[str, object] = {}
+            metadata: dict[str, object] = {}
             if f.topic_key:
                 metadata["topic_key"] = f.topic_key
 
@@ -186,7 +186,7 @@ def promote_scanned_facts(
 
 def _load_existing_passive_fragments(
     storage, scope_id: str, source_tool: str,
-) -> List[Fragment]:
+) -> list[Fragment]:
     """Pull live fragments from the same scope+tool for dedup."""
     from .storage import _row_to_fragment
 
@@ -199,16 +199,16 @@ def _load_existing_passive_fragments(
 
 
 def _index_existing(
-    fragments: List[Fragment],
-) -> Tuple[Dict[str, List[Fragment]], Dict[str, List[Fragment]]]:
+    fragments: list[Fragment],
+) -> tuple[dict[str, list[Fragment]], dict[str, list[Fragment]]]:
     """Index existing fragments by topic_key and by content-stem.
 
     A single legacy fragment with no ``metadata.topic_key`` only appears in the
     stem index. A new-style fragment appears in both — the topic_key map is
     authoritative; the stem map is the migration-bridge fallback.
     """
-    by_topic: Dict[str, List[Fragment]] = {}
-    by_stem: Dict[str, List[Fragment]] = {}
+    by_topic: dict[str, list[Fragment]] = {}
+    by_stem: dict[str, list[Fragment]] = {}
     for f in fragments:
         tk = (f.metadata or {}).get("topic_key")
         if tk:
@@ -219,9 +219,9 @@ def _index_existing(
 
 def _find_matches(
     fact: ScannedFact,
-    by_topic: Dict[str, List[Fragment]],
-    by_stem: Dict[str, List[Fragment]],
-) -> List[Fragment]:
+    by_topic: dict[str, list[Fragment]],
+    by_stem: dict[str, list[Fragment]],
+) -> list[Fragment]:
     """Find existing fragments that fill the same fact slot as ``fact``.
 
     Prefers topic_key matches. Falls back to content-stem matches so the
@@ -233,7 +233,7 @@ def _find_matches(
     two distinct topics whose contents share a stem (e.g. two different
     Dockerfile EXPOSE ports) would cross-supersede on every scan.
     """
-    matches: Dict[str, Fragment] = {}
+    matches: dict[str, Fragment] = {}
     if fact.topic_key:
         for f in by_topic.get(fact.topic_key, []):
             matches[f.id] = f
@@ -258,7 +258,7 @@ def _content_stem(s: str) -> str:
 
 
 def _retire_duplicate_stragglers(
-    storage, matches: List[Fragment], source_tool: str,
+    storage, matches: list[Fragment], source_tool: str,
 ) -> None:
     """When several legacy fragments share the same content as the new fact,
     keep the most recent and mark the rest stale. No new fragment is created.

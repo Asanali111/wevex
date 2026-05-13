@@ -11,12 +11,10 @@ if you want stricter gating.
 """
 from __future__ import annotations
 
-from typing import Dict, Tuple
-
 Op = str  # one of "<=", ">=", "<", ">"
 
 
-BUDGETS: Dict[str, Dict[str, Tuple[Op, float]]] = {
+BUDGETS: dict[str, dict[str, tuple[Op, float]]] = {
     "recall_latency": {
         "warm_p50_ms": ("<=", 100.0),
         "warm_p95_ms": ("<=", 250.0),
@@ -37,9 +35,9 @@ BUDGETS: Dict[str, Dict[str, Tuple[Op, float]]] = {
 }
 
 
-def evaluate(scenario: str, metrics: Dict[str, float]) -> Dict[str, dict]:
+def evaluate(scenario: str, metrics: dict[str, float]) -> dict[str, dict]:
     """Return ``{metric: {observed, op, threshold, ok}}`` for each budgeted metric."""
-    out: Dict[str, dict] = {}
+    out: dict[str, dict] = {}
     rules = BUDGETS.get(scenario, {})
     for metric, (op, threshold) in rules.items():
         if metric not in metrics:

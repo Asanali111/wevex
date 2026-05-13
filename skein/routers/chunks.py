@@ -9,15 +9,16 @@ ingest over HTTP because:
 """
 from __future__ import annotations
 
-from typing import List, Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..auth import AuthContext, RequireAuth
 from ..dependencies import get_provider, get_storage
 from ..embeddings import EmbeddingProvider
 from ..models import (
-    Chunk, ChunkSearchRequest, ChunkSearchResponse, ChunkStats,
+    Chunk,
+    ChunkSearchRequest,
+    ChunkSearchResponse,
+    ChunkStats,
 )
 from ..retrieval import search_chunks
 from ..storage import Storage
@@ -40,8 +41,8 @@ def search(
 def search_get(
     q: str = Query(..., min_length=1),
     scope: str = Query(...),
-    languages: Optional[str] = Query(None, description="Comma-separated language filter"),
-    source_root: Optional[str] = Query(None),
+    languages: str | None = Query(None, description="Comma-separated language filter"),
+    source_root: str | None = Query(None),
     limit: int = Query(10, ge=1, le=50),
     auth: AuthContext = RequireAuth,
     storage: Storage = Depends(get_storage),
@@ -56,16 +57,16 @@ def search_get(
     return search_chunks(req, storage, provider)
 
 
-@router.get("", response_model=List[Chunk])
+@router.get("", response_model=list[Chunk])
 def list_chunks(
     scope: str = Query(..., description="Scope handle or ID"),
-    source_root: Optional[str] = None,
-    language: Optional[str] = None,
+    source_root: str | None = None,
+    language: str | None = None,
     limit: int = Query(50, ge=1, le=500),
     offset: int = 0,
     auth: AuthContext = RequireAuth,
     storage: Storage = Depends(get_storage),
-) -> List[Chunk]:
+) -> list[Chunk]:
     scope_obj = storage.get_scope(scope)
     if not scope_obj:
         raise HTTPException(status_code=404, detail=f"Scope '{scope}' not found")

@@ -11,7 +11,7 @@ daemon. In production we build the real ``HttpDaemonClient`` from
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, ClassVar, List, Optional
+from typing import Callable, ClassVar
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -49,7 +49,7 @@ class SkeinApp(App):
     TITLE = "Skein"
     SUB_TITLE = "context bus"
 
-    BINDINGS: ClassVar[List[Binding]] = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("q", "quit", "quit", show=True),
         Binding("?", "help", "help", show=True),
         Binding("r", "refresh", "refresh", show=True),
@@ -63,14 +63,14 @@ class SkeinApp(App):
 
     def __init__(
         self,
-        scope: Optional[str] = None,
-        client_factory: Optional[Callable[[], DaemonClient]] = None,
+        scope: str | None = None,
+        client_factory: Callable[[], DaemonClient] | None = None,
     ) -> None:
         super().__init__()
         # Defer scope resolution: in test mode we don't want config side effects.
         self._explicit_scope = scope
         self._client_factory = client_factory
-        self._client: Optional[DaemonClient] = None
+        self._client: DaemonClient | None = None
         self._scope: str = scope or "personal:scratch"
 
     # ------------------------------------------------------------------ compose

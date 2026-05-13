@@ -20,7 +20,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 from rich.console import Console
@@ -44,7 +43,7 @@ def _get_config():
     return get_config()
 
 
-def _client(base_url: Optional[str] = None, token: Optional[str] = None):
+def _client(base_url: str | None = None, token: str | None = None):
     """Return an httpx.Client pointed at the daemon."""
     import httpx
     cfg = _get_config()
@@ -95,7 +94,7 @@ def _resolve_self_bin() -> str:
     return found or "skein"
 
 
-def _resolve_scope(cli_scope: Optional[str]) -> str:
+def _resolve_scope(cli_scope: str | None) -> str:
     """Resolve the active scope handle for any CLI command.
 
     Honors (in order): --scope flag, SKEIN_SCOPE env, .skein/scope pin, config default.
@@ -162,7 +161,7 @@ def main(ctx: click.Context) -> None:
               help="Also install hooks user-globally (~/.claude/settings.json).")
 def up(
     path: str,
-    scope: Optional[str],
+    scope: str | None,
     no_persist: bool,
     no_ingest: bool,
     no_sync: bool,
@@ -194,7 +193,7 @@ def up(
     from .agents_md import render_agents_md
     from .auth import generate_token
     from .config import SkeinConfig, _default_config_path, load_config
-    from .daemon import current_status, ensure_running
+    from .daemon import ensure_running
     from .embeddings import get_provider as _get_emb
     from .hooks_install import install_hooks
     from .ingest import ingest_directory
@@ -366,8 +365,8 @@ def up(
         # still leaked a long-running watcher process and polluted the
         # projects registry. The .git / refuse_root checks now run before
         # anything that touches durable state. (Iter 15 bugfix.)
-        from .ingest import _refuse_root
         from . import ui
+        from .ingest import _refuse_root
 
         refusal = _refuse_root(repo_path)
         if refusal and not no_ingest:
@@ -403,8 +402,8 @@ def up(
         # outliving a transient invocation, and we don't want test runs to
         # pollute the user's real ~/.config/skein/projects.json.
         if not no_persist:
-            from .projects import ProjectEntry, upsert_project
             from . import watcher_manager
+            from .projects import ProjectEntry, upsert_project
             entry = ProjectEntry(
                 scope=scope_handle,
                 root=str(repo_path),
@@ -469,8 +468,11 @@ def up(
                     sys.exit(1)
 
             from rich.progress import (
-                Progress, BarColumn, TextColumn, TimeElapsedColumn,
+                BarColumn,
                 MofNCompleteColumn,
+                Progress,
+                TextColumn,
+                TimeElapsedColumn,
             )
             progress = Progress(
                 TextColumn("  [dim]→[/dim] [bold]Indexing[/bold]"),
@@ -536,10 +538,9 @@ def up(
     # medium-confidence ones for `skein inbox`.
     try:
         from . import ui
-        from .scanner import scan_project
-        from .passive import promote_scanned_facts
         from .config import get_config as _gc
-        from .dependencies import get_storage as _gs, get_provider as _gp
+        from .passive import promote_scanned_facts
+        from .scanner import scan_project
         # Re-open storage briefly for the scan since we just closed it above
         cfg2 = _gc()
         from .storage import Storage as _Storage
@@ -562,7 +563,7 @@ def up(
                 )
                 if res.auto_promoted or res.queued:
                     ui.step(
-                        f"Scanned project for implicit facts",
+                        "Scanned project for implicit facts",
                         detail=(
                             f"{res.auto_promoted} auto-stored · "
                             f"{res.queued} queued for review · "
@@ -586,9 +587,9 @@ def up(
     # the project's own documentation, not just scanner trivia.
     try:
         from . import ui
+        from .config import get_config as _gc
         from .docs_watcher import scan_docs
         from .passive import promote_scanned_facts
-        from .config import get_config as _gc
         from .storage import Storage as _Storage
         cfg2 = _gc()
         st = _Storage(cfg2.db_path)
@@ -655,13 +656,12 @@ def up(
               help="Keep the project registered (daemon will still watch it on restart).")
 @click.option("--repo", default=None, type=click.Path(file_okay=False),
               help="Project root for hook removal (default: cwd).")
-def down(no_uninstall_hooks: bool, keep_registered: bool, repo: Optional[str]) -> None:
+def down(no_uninstall_hooks: bool, keep_registered: bool, repo: str | None) -> None:
     """Stop the daemon (any backend), kill the watcher, unregister the project, and remove hooks."""
-    from . import ui
+    from . import ui, watcher_manager
     from .daemon import stop
     from .hooks_install import uninstall_hooks
-    from . import watcher_manager
-    from .projects import remove_project, list_projects
+    from .projects import list_projects, remove_project
 
     ui.section("Skein down")
     ui.blank()
@@ -672,7 +672,7 @@ def down(no_uninstall_hooks: bool, keep_registered: bool, repo: Optional[str]) -
     for entry in list_projects():
         if entry.root == repo_root_resolved and watcher_manager.is_running(entry):
             if watcher_manager.kill(entry):
-                ui.step(f"Watcher stopped", detail=entry.scope, state="ok")
+                ui.step("Watcher stopped", detail=entry.scope, state="ok")
 
     status = stop()
     if status.running:
@@ -703,7 +703,7 @@ def restart() -> None:
     status = do_restart()
     if status.healthy:
         ui.blank()
-        ui.step(f"Daemon restarted", detail=f"via {status.method}", state="ok")
+        ui.step("Daemon restarted", detail=f"via {status.method}", state="ok")
         ui.blank()
     else:
         err_console.print(
@@ -723,6 +723,7 @@ def daemon_grp() -> None:
 def daemon_status(output_json: bool) -> None:
     """Show daemon backend, PID, and health."""
     from dataclasses import asdict
+
     from . import ui
     from .daemon import current_status
     s = current_status()
@@ -776,7 +777,7 @@ def daemon_logs(err: bool, n: int) -> None:
               help="Stable source-root label. Defaults to PATH's basename.")
 @click.option("--polling", is_flag=True, default=False,
               help="Force the polling backend instead of watchdog.")
-def watch(path: str, scope: str, source_root: Optional[str], polling: bool) -> None:
+def watch(path: str, scope: str, source_root: str | None, polling: bool) -> None:
     """Run a foreground filesystem watcher for one project.
 
     \b
@@ -784,6 +785,7 @@ def watch(path: str, scope: str, source_root: Optional[str], polling: bool) -> N
     Direct invocation is fine for debugging.
     """
     import signal as _signal
+
     from .config import get_config
     from .embeddings import get_provider as _get_emb
     from .storage import Storage
@@ -856,9 +858,8 @@ def projects() -> None:
 @click.option("--json", "output_json", is_flag=True, default=False)
 def projects_list(output_json: bool) -> None:
     """Show every registered project and whether its watcher is running."""
-    from . import ui
+    from . import ui, watcher_manager
     from .projects import list_projects
-    from . import watcher_manager
 
     items = list_projects()
     if output_json:
@@ -934,7 +935,7 @@ def projects_remove(root_or_scope: str) -> None:
 @click.option("--force", is_flag=True, default=False,
               help="Overwrite existing config (regenerates token).")
 def init(
-    db_path: Optional[str],
+    db_path: str | None,
     port: int,
     host: str,
     embedding_provider: str,
@@ -1027,10 +1028,10 @@ def init(
 @click.option("--log-level", default=None,
               type=click.Choice(["debug", "info", "warning", "error"]))
 def serve(
-    host: Optional[str],
-    port: Optional[int],
+    host: str | None,
+    port: int | None,
     reload: bool,
-    log_level: Optional[str],
+    log_level: str | None,
 ) -> None:
     """Start the Skein daemon (FastAPI + MCP on 127.0.0.1:8765).
 
@@ -1042,7 +1043,8 @@ def serve(
       Docs      http://127.0.0.1:8765/docs
     """
     import uvicorn
-    from .config import get_config, reset_config
+
+    from .config import get_config
 
     cfg = get_config()
     effective_host = host or cfg.host
@@ -1085,7 +1087,7 @@ def serve(
 @click.option("--repo", default=None, type=click.Path(file_okay=False),
               help="Project root dir (default: cwd).")
 @click.option("--dry-run", is_flag=True, default=False, help="Print what would be written.")
-def sync(scope: Optional[str], repo: Optional[str], dry_run: bool) -> None:
+def sync(scope: str | None, repo: str | None, dry_run: bool) -> None:
     """Write MCP configs for all LLM clients + regenerate AGENTS.md.
 
     \b
@@ -1106,7 +1108,7 @@ def sync(scope: Optional[str], repo: Optional[str], dry_run: bool) -> None:
     storage = Storage(cfg.db_path)
 
     # Render AGENTS.md
-    existing_agents_md: Optional[str] = None
+    existing_agents_md: str | None = None
     agents_md_path = repo_path / "AGENTS.md"
     if agents_md_path.exists():
         existing_agents_md = agents_md_path.read_text()
@@ -1123,7 +1125,7 @@ def sync(scope: Optional[str], repo: Optional[str], dry_run: bool) -> None:
     if dry_run:
         console.print("[bold]Dry run — would write:[/bold]")
         console.print(f"  AGENTS.md ({len(agents_md_content)} chars)")
-        console.print(f"  CLAUDE.md (one-line @AGENTS.md shim)")
+        console.print("  CLAUDE.md (one-line @AGENTS.md shim)")
         if connected:
             console.print(f"  MCP configs for: {', '.join(connected)}")
         else:
@@ -1189,7 +1191,7 @@ def _render_clients_table(connected_ids: set) -> tuple:
 @click.option("--no-sync", is_flag=True, default=False,
               help="Update the registry but don't write configs yet.")
 def connect(
-    client_id: Optional[str],
+    client_id: str | None,
     all_detected: bool,
     no_sync: bool,
 ) -> None:
@@ -1203,10 +1205,10 @@ def connect(
     """
     from . import clients as clients_mod
     from . import connections as conns
-    from .config import get_config
-    from .sync import sync_all
     from .agents_md import render_agents_md
+    from .config import get_config
     from .storage import Storage
+    from .sync import sync_all
 
     cfg = get_config()
     connected_ids = set(conns.get_connected_ids())
@@ -1357,7 +1359,7 @@ def connect(
 @click.argument("client_id", required=False)
 @click.option("--all", "all_connected", is_flag=True, default=False,
               help="Disconnect every currently connected client.")
-def disconnect(client_id: Optional[str], all_connected: bool) -> None:
+def disconnect(client_id: str | None, all_connected: bool) -> None:
     """Remove Skein from one or all connected LLM tools.
 
     \b
@@ -1367,9 +1369,8 @@ def disconnect(client_id: Optional[str], all_connected: bool) -> None:
     """
     from . import clients as clients_mod
     from . import connections as conns
-    from .sync import disconnect_client
-
     from . import ui
+    from .sync import disconnect_client
 
     if not client_id and not all_connected:
         err_console.print(
@@ -1485,10 +1486,10 @@ def clients_cmd(output_json: bool) -> None:
 def remember(
     content: str,
     frag_type: str,
-    scope: Optional[str],
-    territory: Optional[str],
+    scope: str | None,
+    territory: str | None,
     tag: tuple,
-    ttl: Optional[int],
+    ttl: int | None,
     output_json: bool,
 ) -> None:
     """Store a context fragment.
@@ -1499,7 +1500,7 @@ def remember(
         skein remember "rate limit is 1000 req/min" --type fact --territory backend/api
         skein remember "prefer async/await over callbacks" --type preference
     """
-    cfg = _get_config()
+    _get_config()
     scope_handle = _resolve_scope(scope)
 
     payload: dict = {
@@ -1557,9 +1558,9 @@ def remember(
 @click.option("--json", "output_json", is_flag=True, default=False)
 def recall(
     query: str,
-    scope: Optional[str],
+    scope: str | None,
     types: tuple,
-    territory: Optional[str],
+    territory: str | None,
     limit: int,
     output_json: bool,
 ) -> None:
@@ -1571,7 +1572,7 @@ def recall(
         skein recall "auth middleware" --type decision --type observation
         skein recall "rate limits" --territory backend/api --limit 5
     """
-    cfg = _get_config()
+    _get_config()
     scope_handle = _resolve_scope(scope)
 
     payload: dict = {
@@ -1675,9 +1676,9 @@ def _parse_since(raw: str) -> str:
 @click.option("--json", "output_json", is_flag=True, default=False)
 def since(
     since_arg: str,
-    scope: Optional[str],
+    scope: str | None,
     types: tuple,
-    exclude_tool: Optional[str],
+    exclude_tool: str | None,
     limit: int,
     output_json: bool,
 ) -> None:
@@ -1786,10 +1787,10 @@ def since(
 @click.option("--json", "output_json", is_flag=True, default=False)
 def note(
     content: str,
-    scope: Optional[str],
-    territory: Optional[str],
-    alternatives: Optional[str],
-    rationale: Optional[str],
+    scope: str | None,
+    territory: str | None,
+    alternatives: str | None,
+    rationale: str | None,
     tag: tuple,
     output_json: bool,
 ) -> None:
@@ -1809,7 +1810,7 @@ def note(
         parts.append(f"\nRationale: {rationale}")
     full = "".join(parts)
 
-    cfg = _get_config()
+    _get_config()
     scope_handle = _resolve_scope(scope)
 
     payload: dict = {
@@ -1853,9 +1854,9 @@ def note(
 @click.option("--json", "output_json", is_flag=True, default=False)
 def lease(
     glob: str,
-    scope: Optional[str],
+    scope: str | None,
     ttl: int,
-    reason: Optional[str],
+    reason: str | None,
     output_json: bool,
 ) -> None:
     """Acquire an advisory lease on a file-glob pattern.
@@ -1864,7 +1865,7 @@ def lease(
     Example:
         skein lease "backend/auth/**" --reason "refactoring auth middleware"
     """
-    cfg = _get_config()
+    _get_config()
     scope_handle = _resolve_scope(scope)
 
     payload: dict = {
@@ -1913,12 +1914,12 @@ def lease(
               help="Show expired leases too.")
 @click.option("--json", "output_json", is_flag=True, default=False)
 def leases(
-    scope: Optional[str],
+    scope: str | None,
     show_all: bool,
     output_json: bool,
 ) -> None:
     """List active advisory leases."""
-    cfg = _get_config()
+    _get_config()
     scope_handle = _resolve_scope(scope)
 
     params: dict = {"active_only": not show_all}
@@ -1969,7 +1970,7 @@ def leases(
 @click.option("--scope", default=None)
 @click.option("--write", "write_path", default=None, type=click.Path(),
               help="Write to this file instead of stdout.")
-def agents_md_cmd(scope: Optional[str], write_path: Optional[str]) -> None:
+def agents_md_cmd(scope: str | None, write_path: str | None) -> None:
     """Print or write the rendered AGENTS.md for a scope."""
     from .agents_md import render_agents_md
     from .config import get_config
@@ -2042,7 +2043,7 @@ def status(output_json: bool) -> None:
 @click.option("--scope", default=None, help="Override the auto-detected scope.")
 @click.option("--json", "output_json", is_flag=True, default=False,
               help="Emit the raw JSON payload (LLM-friendly).")
-def briefing(scope: Optional[str], output_json: bool) -> None:
+def briefing(scope: str | None, output_json: bool) -> None:
     """Show the project's current state in one round trip.
 
     Mirrors the `project_briefing` MCP tool: fragment counts by type, recent
@@ -2125,7 +2126,7 @@ def briefing(scope: Optional[str], output_json: bool) -> None:
 @click.option("--scope", default=None, help="Override the auto-detected scope.")
 @click.option("--session-start", is_flag=True, default=False,
               help="Preview the SessionStart injection (no query needed).")
-def preview(query: Optional[str], scope: Optional[str], session_start: bool) -> None:
+def preview(query: str | None, scope: str | None, session_start: bool) -> None:
     """Show the EXACT markdown that Skein would inject into an agent prompt.
 
     \b
@@ -2307,7 +2308,9 @@ def gc(yes: bool, dry_run: bool) -> None:
                     noise_frags.append(f)
 
         # 4. Conversation fragments older than 30 days
-        from datetime import datetime as _dt, timedelta, timezone as _tz
+        from datetime import datetime as _dt
+        from datetime import timedelta
+        from datetime import timezone as _tz
         cutoff = (_dt.now(_tz.utc) - timedelta(days=30)).isoformat()
         old_convo_frags = []
         for scope in storage.list_scopes(limit=1000):
@@ -2408,7 +2411,7 @@ def gc(yes: bool, dry_run: bool) -> None:
 @click.option("--scope", default=None, help="Filter by scope.")
 @click.option("-n", "--limit", default=20, show_default=True, type=int)
 @click.option("--json", "output_json", is_flag=True, default=False)
-def events(scope: Optional[str], limit: int, output_json: bool) -> None:
+def events(scope: str | None, limit: int, output_json: bool) -> None:
     """Show the latest activity on the context bus — what each agent stored,
     when, and in which scope. Quickest way to audit what the AI is doing
     behind the user's back.
@@ -2472,6 +2475,7 @@ def doctor(show_perf: bool) -> None:
       - AGENTS.md in cwd (if a scope is configured)
     """
     import shutil
+
     from . import ui
     from .config import _default_config_path, get_config
 
@@ -2608,7 +2612,7 @@ def doctor(show_perf: bool) -> None:
                 p50 = recall_times[len(recall_times) // 2]
                 p_worst = recall_times[-1]
                 ui.step(
-                    f"Recall (5 results, BM25+vector)",
+                    "Recall (5 results, BM25+vector)",
                     detail=f"p50={p50:.0f}ms · worst={p_worst:.0f}ms",
                     state="ok" if p50 < 500 else "warn",
                 )
@@ -2623,7 +2627,7 @@ def doctor(show_perf: bool) -> None:
                 s_p50 = search_times[len(search_times) // 2]
                 s_worst = search_times[-1]
                 ui.step(
-                    f"Code search (5 results)",
+                    "Code search (5 results)",
                     detail=f"p50={s_p50:.0f}ms · worst={s_worst:.0f}ms",
                     state="ok" if s_p50 < 500 else "warn",
                 )
@@ -2685,9 +2689,9 @@ def scope() -> None:
 @click.option("--json", "output_json", is_flag=True, default=False)
 def scope_create(
     handle: str,
-    name: Optional[str],
+    name: str | None,
     scope_type: str,
-    parent: Optional[str],
+    parent: str | None,
     output_json: bool,
 ) -> None:
     """Create a new scope.
@@ -2768,7 +2772,7 @@ def docs() -> None:
 @click.option("--repo", default=None, type=click.Path(file_okay=False),
               help="Project root to scan (default: cwd).")
 @click.option("--scope", default=None, help="Scope handle (default: from .skein/scope or config).")
-def docs_sync(repo: Optional[str], scope: Optional[str]) -> None:
+def docs_sync(repo: str | None, scope: str | None) -> None:
     """Re-scan README/CHANGELOG/docs/** and promote fragments now.
 
     Useful after editing the project's docs without re-running ``skein up``.
@@ -2884,8 +2888,8 @@ def hooks() -> None:
 @click.option("--skein-bin", default="skein", show_default=True,
               help="Path to skein binary used in the hook commands.")
 def hooks_install(
-    scope: Optional[str],
-    repo: Optional[str],
+    scope: str | None,
+    repo: str | None,
     user_global: bool,
     skein_bin: str,
 ) -> None:
@@ -2907,7 +2911,7 @@ def hooks_install(
     """
     from .hooks_install import install_hooks
 
-    cfg = _get_config()
+    _get_config()
     repo_path = Path(repo) if repo else Path.cwd()
     scope_handle = _resolve_scope(scope)
 
@@ -2940,7 +2944,7 @@ def hooks_install(
 
 @hooks.command("uninstall")
 @click.option("--repo", default=None, type=click.Path(file_okay=False))
-def hooks_uninstall(repo: Optional[str]) -> None:
+def hooks_uninstall(repo: str | None) -> None:
     """Remove Skein-managed hooks (preserves user-added entries)."""
     from .hooks_install import uninstall_hooks
 
@@ -2958,7 +2962,7 @@ def hooks_uninstall(repo: Optional[str]) -> None:
 
 @hooks.command("list")
 @click.option("--repo", default=None, type=click.Path(file_okay=False))
-def hooks_list(repo: Optional[str]) -> None:
+def hooks_list(repo: str | None) -> None:
     """Show what Skein hooks are installed in this project / globally."""
     repo_path = Path(repo) if repo else Path.cwd()
 
@@ -3025,13 +3029,13 @@ def hooks_list(repo: Optional[str]) -> None:
               help="Suppress per-file progress.")
 def ingest(
     path: str,
-    scope: Optional[str],
-    source_root: Optional[str],
+    scope: str | None,
+    source_root: str | None,
     chunk_lines: int,
     overlap_lines: int,
-    include_exts: Optional[str],
+    include_exts: str | None,
     extra_excludes: tuple,
-    max_bytes: Optional[int],
+    max_bytes: int | None,
     prune: bool,
     reset: bool,
     dry_run: bool,
@@ -3054,7 +3058,7 @@ def ingest(
     from .config import get_config
     from .embeddings import get_provider as _get_emb
     from .ingest import (
-        DEFAULT_INCLUDE_EXTS, MAX_FILE_BYTES,
+        MAX_FILE_BYTES,
         ingest_directory,
     )
     from .models import IdentityCreate, ScopeCreate
@@ -3188,9 +3192,9 @@ def ingest(
 @click.option("--json", "output_json", is_flag=True, default=False)
 def search(
     query: str,
-    scope: Optional[str],
+    scope: str | None,
     language: tuple,
-    source_root: Optional[str],
+    source_root: str | None,
     limit: int,
     show_content: bool,
     max_content_lines: int,
@@ -3287,7 +3291,7 @@ def chunks() -> None:
 @chunks.command("stats")
 @click.option("--scope", default=None)
 @click.option("--json", "output_json", is_flag=True, default=False)
-def chunks_stats(scope: Optional[str], output_json: bool) -> None:
+def chunks_stats(scope: str | None, output_json: bool) -> None:
     """Show how much code is indexed for a scope."""
     from .config import get_config
     from .storage import Storage
@@ -3332,9 +3336,9 @@ def chunks_stats(scope: Optional[str], output_json: bool) -> None:
 @click.option("--language", "-l", default=None)
 @click.option("--limit", "-n", default=20, type=int, show_default=True)
 def chunks_list(
-    scope: Optional[str],
-    source_root: Optional[str],
-    language: Optional[str],
+    scope: str | None,
+    source_root: str | None,
+    language: str | None,
     limit: int,
 ) -> None:
     """List indexed chunks (for inspection)."""
@@ -3380,7 +3384,7 @@ def chunks_list(
 @click.argument("source_root")
 @click.option("--scope", default=None)
 @click.option("--yes", is_flag=True, default=False, help="Skip confirmation.")
-def chunks_delete_root(source_root: str, scope: Optional[str], yes: bool) -> None:
+def chunks_delete_root(source_root: str, scope: str | None, yes: bool) -> None:
     """Delete every chunk under a given source_root."""
     from . import ui
     from .config import get_config
@@ -3580,7 +3584,7 @@ def config_set(key: str, value: str) -> None:
 @click.option("--scope", default=None, help="Restrict to a scope handle. Defaults to auto-resolve.")
 @click.option("--limit", "-n", default=5, show_default=True, type=int,
               help="How many top matches to expand.")
-def archaeology(query: str, scope: Optional[str], limit: int) -> None:
+def archaeology(query: str, scope: str | None, limit: int) -> None:
     """Trace the history of a decision: matching fragment → provenance → supersede chain.
 
     Pass a free-text query (e.g. ``skein archaeology "session store"``) or a
@@ -3589,11 +3593,11 @@ def archaeology(query: str, scope: Optional[str], limit: int) -> None:
     directions.
     """
     from .config import get_config
+    from .embeddings import get_provider as _get_provider
     from .models import RecallRequest
     from .retrieval import recall as do_recall
     from .scope_resolver import resolve_scope
     from .storage import Storage
-    from .embeddings import get_provider as _get_provider
 
     cfg = get_config()
     if scope is None:
@@ -3642,7 +3646,6 @@ def archaeology(query: str, scope: Optional[str], limit: int) -> None:
 
 def _render_archaeology(storage, frag, score: float) -> None:
     """Print one fragment's full provenance + walk supersede chain."""
-    import json as _json
     # Walk supersede chain backward (older → newer)
     chain = [frag]
     cur = frag
@@ -3691,7 +3694,7 @@ def _render_archaeology(storage, frag, score: float) -> None:
         if f.territory:
             console.print(f"      [dim]territory:[/dim] {f.territory}")
         if f.tags:
-            console.print(f"      [dim]tags:[/dim]    #" + " #".join(f.tags))
+            console.print("      [dim]tags:[/dim]    #" + " #".join(f.tags))
         if f.stale_reason:
             console.print(f"      [dim]stale reason:[/dim] {f.stale_reason}")
 
@@ -3704,7 +3707,7 @@ def _render_archaeology(storage, frag, score: float) -> None:
 @click.option("--scope", default=None, help="Filter to a scope. Default: auto-resolve.")
 @click.option("--limit", "-n", default=20, show_default=True, type=int)
 @click.pass_context
-def inbox(ctx: click.Context, scope: Optional[str], limit: int) -> None:
+def inbox(ctx: click.Context, scope: str | None, limit: int) -> None:
     """Review medium-confidence fragments extracted by passive watchers.
 
     Run with no subcommand to list pending items; use
@@ -3756,11 +3759,12 @@ def inbox(ctx: click.Context, scope: Optional[str], limit: int) -> None:
 @click.argument("candidate_id")
 def inbox_approve(candidate_id: str) -> None:
     """Promote a pending candidate into a real fragment."""
+    from .auth import token_prefix as _tp
     from .config import get_config
+    from .embeddings import get_provider as _get_provider
+    from .embeddings import vec_to_bytes
     from .models import CommitCreate, FragmentCreate, IdentityCreate
     from .storage import Storage
-    from .embeddings import get_provider as _get_provider, vec_to_bytes
-    from .auth import token_prefix as _tp
     cfg = get_config()
     storage = Storage(cfg.db_path)
     try:
@@ -3831,10 +3835,10 @@ def inbox_reject(candidate_id: str) -> None:
             (candidate_id + "%",),
         ).fetchall()
         if len(rows) != 1:
-            err_console.print(f"[red]✗[/red] Need a unique candidate id prefix.")
+            err_console.print("[red]✗[/red] Need a unique candidate id prefix.")
             sys.exit(1)
         if storage.mark_candidate_status(rows[0]["id"], "rejected"):
-            console.print(f"[yellow]✗[/yellow] Rejected.")
+            console.print("[yellow]✗[/yellow] Rejected.")
         else:
             console.print("[dim]Already reviewed.[/dim]")
     finally:
@@ -3859,8 +3863,8 @@ def inbox_reject(candidate_id: str) -> None:
 def tail(
     n_lines: int,
     follow: bool,
-    filter_events: Optional[str],
-    scope: Optional[str],
+    filter_events: str | None,
+    scope: str | None,
     output_json: bool,
 ) -> None:
     """Tail the Skein event log (recall, remember, supersede, leases, …).
@@ -3885,7 +3889,7 @@ def tail(
     if filter_events:
         wanted = {x.strip() for x in filter_events.split(",") if x.strip()}
 
-    def _format(line: str) -> Optional[str]:
+    def _format(line: str) -> str | None:
         line = line.strip()
         if not line:
             return None
@@ -3906,7 +3910,7 @@ def tail(
         # Compact detail rendering — keep tail readable for humans
         detail_bits = []
         for key in ("query", "preview", "glob"):
-            if key in details and details[key]:
+            if details.get(key):
                 detail_bits.append(f"{key}={details[key]!r}")
         for key in ("hits", "type", "fragment_id", "old_fragment_id", "new_fragment_id", "lease_id"):
             if key in details:
@@ -3919,7 +3923,7 @@ def tail(
 
     # --- replay last N lines ---
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             tail_lines = f.readlines()[-n_lines:]
     except FileNotFoundError:
         tail_lines = []
@@ -3934,7 +3938,7 @@ def tail(
     # --- follow new appends ---
     import time as _time
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             f.seek(0, 2)  # EOF
             while True:
                 line = f.readline()
@@ -3958,7 +3962,7 @@ def tail(
 @main.command()
 @click.option("--scope", default=None,
               help="Scope handle (default: auto-resolve like every other command).")
-def tui(scope: Optional[str]) -> None:
+def tui(scope: str | None) -> None:
     """Launch the Skein control-panel TUI.
 
     A single-window Textual app with five tabs:

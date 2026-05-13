@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
-
 
 # ---------------------------------------------------------------------------
 # Result shapes (tool-agnostic)
@@ -51,7 +49,7 @@ class HealthInfo:
     scope_count: int = 0
     version: str = ""
     tool: str = ""
-    extra: Dict[str, object] = field(default_factory=dict)
+    extra: dict[str, object] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +80,8 @@ class ReadOnlyAdapter(ABC):
         scope: str,
         *,
         limit: int = 10,
-        types: Optional[List[str]] = None,
-    ) -> List[FragmentResult]:
+        types: list[str] | None = None,
+    ) -> list[FragmentResult]:
         """Search the fragment bus by semantic+keyword. Ordered by score desc."""
 
     @abstractmethod
@@ -93,7 +91,7 @@ class ReadOnlyAdapter(ABC):
         scope: str,
         *,
         limit: int = 10,
-    ) -> List[CodeChunkResult]:
+    ) -> list[CodeChunkResult]:
         """Search the indexed codebase. Ordered by score desc."""
 
 
@@ -110,7 +108,7 @@ class MutableAdapter(ReadOnlyAdapter):
         """Wipe all data. Destructive — only call against ephemeral DB."""
 
     @abstractmethod
-    def ensure_scope(self, handle: str, *, parent: Optional[str] = None) -> str:
+    def ensure_scope(self, handle: str, *, parent: str | None = None) -> str:
         """Create scope if missing, return scope id/handle."""
 
     @abstractmethod
@@ -120,15 +118,15 @@ class MutableAdapter(ReadOnlyAdapter):
         *,
         type: str,
         scope: str,
-        tags: Optional[List[str]] = None,
-        territory: Optional[str] = None,
+        tags: list[str] | None = None,
+        territory: str | None = None,
     ) -> str:
         """Store a fragment, return its id."""
 
     @abstractmethod
     def ingest_text(
         self,
-        files: Dict[str, str],
+        files: dict[str, str],
         *,
         scope: str,
         source_root: str = "bench",
@@ -149,7 +147,7 @@ class MutableAdapter(ReadOnlyAdapter):
         """
         raise NotImplementedError(f"{self.name}: git capture not supported")
 
-    def claim_lease(self, glob: str, *, scope: str, ttl_seconds: int = 60) -> Optional[str]:
+    def claim_lease(self, glob: str, *, scope: str, ttl_seconds: int = 60) -> str | None:
         """Attempt to claim an advisory lease. Return id or None on conflict."""
         raise NotImplementedError(f"{self.name}: leases not supported")
 

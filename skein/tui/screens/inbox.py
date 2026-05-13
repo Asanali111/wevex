@@ -1,7 +1,7 @@
 """Inbox pane — review pending extraction candidates."""
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar
 
 from textual import work
 from textual.app import ComposeResult
@@ -15,16 +15,16 @@ from ..client import DaemonClient
 class InboxPane(Container):
     """List of pending fragments + approve/reject chords."""
 
-    BINDINGS: ClassVar[List[Binding]] = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("a", "approve", "approve", show=False),
         Binding("x", "reject", "reject", show=False),
     ]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._client: Optional[DaemonClient] = None
+        self._client: DaemonClient | None = None
         self._scope: str = ""
-        self._candidates: List[Dict[str, Any]] = []
+        self._candidates: list[dict[str, Any]] = []
 
     def compose(self) -> ComposeResult:
         yield DataTable(id="inbox-list", zebra_stripes=True, cursor_type="row")
@@ -54,7 +54,7 @@ class InboxPane(Container):
             return
         self._do_action(cand["id"], "reject")
 
-    def _selected(self) -> Optional[Dict[str, Any]]:
+    def _selected(self) -> dict[str, Any] | None:
         table = self.query_one("#inbox-list", DataTable)
         if table.cursor_row is None:
             return None

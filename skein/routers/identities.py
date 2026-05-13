@@ -1,8 +1,6 @@
 """REST router: /v1/identities"""
 from __future__ import annotations
 
-from typing import List
-
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..auth import AuthContext, RequireAuth
@@ -28,13 +26,13 @@ def create_identity(
     return storage.create_identity(data)
 
 
-@router.get("", response_model=List[Identity])
+@router.get("", response_model=list[Identity])
 def list_identities(
     limit: int = 50,
     offset: int = 0,
     auth: AuthContext = RequireAuth,
     storage: Storage = Depends(get_storage),
-) -> List[Identity]:
+) -> list[Identity]:
     return storage.list_identities(limit=limit, offset=offset)
 
 

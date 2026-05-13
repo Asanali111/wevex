@@ -23,20 +23,23 @@ uses, so writes flow through SQLite WAL and are immediately visible to
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import os
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from .embeddings import EmbeddingProvider, vec_to_bytes
 from .ingest import (
-    DEFAULT_EXCLUDES, DEFAULT_INCLUDE_EXTS, LANGUAGE_BY_EXT,
-    MAX_CHUNK_CHARS, MAX_FILE_BYTES, _chunk_text,
+    DEFAULT_EXCLUDES,
+    DEFAULT_INCLUDE_EXTS,
+    LANGUAGE_BY_EXT,
+    MAX_CHUNK_CHARS,
+    MAX_FILE_BYTES,
+    _chunk_text,
 )
 from .models import ChunkCreate
 from .storage import Storage
@@ -66,11 +69,11 @@ class _BaseWatcher:
         scope_id: str,
         source_root: str,
         storage: Storage,
-        provider: Optional[EmbeddingProvider],
+        provider: EmbeddingProvider | None,
         *,
         chunk_lines: int = 80,
         overlap_lines: int = 10,
-        include_exts: Optional[Iterable[str]] = None,
+        include_exts: Iterable[str] | None = None,
         excludes: Iterable[str] = (),
         debounce_secs: float = DEFAULT_DEBOUNCE,
         max_file_bytes: int = MAX_FILE_BYTES,
@@ -82,7 +85,7 @@ class _BaseWatcher:
         self.provider = provider
         self.chunk_lines = chunk_lines
         self.overlap_lines = overlap_lines
-        self.include_set: Set[str] = (
+        self.include_set: set[str] = (
             set(include_exts) if include_exts is not None else set(DEFAULT_INCLUDE_EXTS)
         )
         self.excludes = set(DEFAULT_EXCLUDES) | set(excludes)
@@ -92,7 +95,7 @@ class _BaseWatcher:
 
         # Pending re-ingests, keyed by absolute path.  Value is the time the
         # file last changed; we re-ingest when (now - pending[path]) >= debounce.
-        self._pending: Dict[Path, float] = {}
+        self._pending: dict[Path, float] = {}
         self._pending_lock = threading.Lock()
 
         self._stop_event = threading.Event()
@@ -144,7 +147,7 @@ class _BaseWatcher:
     def _drain_pending(self) -> None:
         """Re-ingest any pending paths whose debounce window has elapsed."""
         now = time.time()
-        ready: List[Path] = []
+        ready: list[Path] = []
         with self._pending_lock:
             for path, ts in list(self._pending.items()):
                 if now - ts >= self.debounce_secs:
@@ -178,7 +181,7 @@ class _BaseWatcher:
 
         # Embed the batch
         contents = [c["content"][:MAX_CHUNK_CHARS] for c in chunks]
-        embeddings: List[Optional[bytes]] = [None] * len(contents)
+        embeddings: list[bytes | None] = [None] * len(contents)
         if self.provider is not None:
             try:
                 vecs = self.provider.embed(contents)
@@ -197,7 +200,7 @@ class _BaseWatcher:
             begin()
         try:
             # Upsert each chunk; capture which (line_start, line_end) we still own
-            owned_ranges: Set[Tuple[int, int]] = set()
+            owned_ranges: set[tuple[int, int]] = set()
             for c, content, emb in zip(chunks, contents, embeddings):
                 content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
                 chunk_create = ChunkCreate(
@@ -333,8 +336,8 @@ class _PollingWatcher(_BaseWatcher):
                  **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.poll_interval = poll_interval
-        self._mtimes: Dict[Path, float] = {}
-        self._thread: Optional[threading.Thread] = None
+        self._mtimes: dict[Path, float] = {}
+        self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         self._initial_scan()
@@ -361,7 +364,7 @@ class _PollingWatcher(_BaseWatcher):
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():
-            current: Dict[Path, float] = {}
+            current: dict[Path, float] = {}
             for p, mtime in self._scan():
                 current[p] = mtime
                 prev = self._mtimes.get(p)
@@ -383,7 +386,7 @@ class _PollingWatcher(_BaseWatcher):
 
 def make_watcher(
     root: Path, scope_id: str, source_root: str,
-    storage: Storage, provider: Optional[EmbeddingProvider],
+    storage: Storage, provider: EmbeddingProvider | None,
     *, force_polling: bool = False, **kwargs,
 ) -> _BaseWatcher:
     """Build the best watcher available for this platform / install."""

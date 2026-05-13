@@ -19,8 +19,7 @@ to override (used in tests and for `--json` paths that route to stderr).
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
-from typing import Iterable, List, Optional, Sequence, Tuple
+from collections.abc import Iterable, Sequence
 
 from rich.console import Console
 
@@ -71,7 +70,7 @@ def mark(state: str = "ok") -> str:
 # Section header — bold title with a status dot
 # ---------------------------------------------------------------------------
 
-def header(title: str, *, state: str = "ok", subtitle: Optional[str] = None) -> None:
+def header(title: str, *, state: str = "ok", subtitle: str | None = None) -> None:
     console.print()
     line = f"  {dot(state)} [bold]{title}[/bold]"
     if subtitle:
@@ -101,9 +100,9 @@ def field(label: str, value: str, *, label_width: int = 12, indent: int = 2) -> 
 
 
 def fields(
-    pairs: Sequence[Tuple[str, str]],
+    pairs: Sequence[tuple[str, str]],
     *,
-    label_width: Optional[int] = None,
+    label_width: int | None = None,
     indent: int = 2,
 ) -> None:
     """Print a block of label/value rows; auto-sizes the label column."""
@@ -125,7 +124,7 @@ def bullet(text: str, *, indent: int = 4, mark_str: str = "·",
     console.print(f"{pad}[{mark_color}]{mark_str}[/{mark_color}] {text}")
 
 
-def step(text: str, *, state: str = "ok", detail: Optional[str] = None,
+def step(text: str, *, state: str = "ok", detail: str | None = None,
          indent: int = 2) -> None:
     """Print ``  ✓ text   detail`` — one line per finished step."""
     pad = " " * indent
@@ -140,7 +139,7 @@ def step(text: str, *, state: str = "ok", detail: Optional[str] = None,
 # ---------------------------------------------------------------------------
 
 def status_list(
-    rows: Iterable[Tuple[str, str, str, str]],
+    rows: Iterable[tuple[str, str, str, str]],
     *,
     indent: int = 2,
 ) -> None:
@@ -172,8 +171,8 @@ def status_list(
 
 def panel_ready(title: str, body: str) -> None:
     """Final 'ready' card. Used by `skein up` and similar terminal moments."""
-    from rich.panel import Panel
     from rich.box import ROUNDED
+    from rich.panel import Panel
     console.print()
     console.print(Panel(
         body,
@@ -211,7 +210,7 @@ def home_relative(path: str) -> str:
 # Status counter line — dim summary footer
 # ---------------------------------------------------------------------------
 
-def counter_line(parts: Sequence[Tuple[int, str]], *, indent: int = 2) -> None:
+def counter_line(parts: Sequence[tuple[int, str]], *, indent: int = 2) -> None:
     """Print ``  3 detected · 2 connected · 4 not installed``.
 
     Each (n, label) becomes ``n label``. Empty-counter parts are dropped."""

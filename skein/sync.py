@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional
 
 from . import clients as clients_mod
 from . import connections as conns
@@ -43,9 +42,9 @@ def sync_all(
     daemon_url: str,
     bearer_token: str,
     scope_handle: str,
-    repo_path: Optional[Path] = None,
-    agents_md_content: Optional[str] = None,
-    client_ids: Optional[List[str]] = None,
+    repo_path: Path | None = None,
+    agents_md_content: str | None = None,
+    client_ids: list[str] | None = None,
 ) -> SyncResult:
     """Write MCP configs for the requested clients and the universal fallback.
 
@@ -96,7 +95,7 @@ def sync_all(
     return result
 
 
-def disconnect_client(client_id: str) -> List[str]:
+def disconnect_client(client_id: str) -> list[str]:
     """Remove ``client_id`` from the registry and clean its config files.
 
     Returns the list of paths that were modified or removed.

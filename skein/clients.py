@@ -21,11 +21,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-import platform
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 logger = logging.getLogger("skein.clients")
 
@@ -52,13 +50,13 @@ def _write_json(path: Path, data: dict) -> None:
         f.write("\n")
 
 
-def _delete_if_empty_or_orphan(path: Path, key_chain: List[str]) -> bool:
+def _delete_if_empty_or_orphan(path: Path, key_chain: list[str]) -> bool:
     """If a JSON file's mcpServers (or other root) is empty after removing skein,
     leave the file but with empty containers — never delete user files."""
     return False  # placeholder; we never auto-delete
 
 
-def _detect_path(*candidates: Path) -> Tuple[bool, str]:
+def _detect_path(*candidates: Path) -> tuple[bool, str]:
     """True if any candidate path exists."""
     for p in candidates:
         if p.exists():
@@ -66,14 +64,14 @@ def _detect_path(*candidates: Path) -> Tuple[bool, str]:
     return False, "no install paths present"
 
 
-def _detect_binary(*names: str) -> Tuple[bool, str]:
+def _detect_binary(*names: str) -> tuple[bool, str]:
     for n in names:
         if shutil.which(n):
             return True, f"binary {n!r} on PATH"
     return False, "no matching binary on PATH"
 
 
-def _detect_any(*results: Tuple[bool, str]) -> Tuple[bool, str]:
+def _detect_any(*results: tuple[bool, str]) -> tuple[bool, str]:
     """OR-combine detect results."""
     found = [r for r in results if r[0]]
     if found:
@@ -91,7 +89,7 @@ class BaseClient:
     description: str = ""
 
     # Subclasses override
-    def detect(self) -> Tuple[bool, str]:
+    def detect(self) -> tuple[bool, str]:
         raise NotImplementedError
 
     def connect(
@@ -100,11 +98,11 @@ class BaseClient:
         bearer_token: str,
         scope_handle: str,
         repo: Path,
-    ) -> List[str]:
+    ) -> list[str]:
         """Write config(s); return list of paths written."""
         raise NotImplementedError
 
-    def disconnect(self, recorded_paths: Optional[List[str]] = None) -> List[str]:
+    def disconnect(self, recorded_paths: list[str] | None = None) -> list[str]:
         """Remove skein from this client's config; return list of paths
         modified or cleaned. ``recorded_paths`` is the list captured at
         connect-time (from the connections registry); subclasses use it as
@@ -121,13 +119,13 @@ class ClaudeCodeClient(BaseClient):
     display_name = "Claude Code"
     description = "Anthropic's official CLI"
 
-    def detect(self) -> Tuple[bool, str]:
+    def detect(self) -> tuple[bool, str]:
         return _detect_any(
             _detect_binary("claude"),
             _detect_path(Path.home() / ".claude"),
         )
 
-    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> List[str]:
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
         if not shutil.which("claude"):
             raise RuntimeError("claude binary not found in PATH")
         env = os.environ.copy()
@@ -156,7 +154,7 @@ class ClaudeCodeClient(BaseClient):
         # Claude stores MCPs in its own settings; we record a logical marker
         return [f"claude:mcp:skein@{mcp_url}"]
 
-    def disconnect(self, recorded_paths=None) -> List[str]:
+    def disconnect(self, recorded_paths=None) -> list[str]:
         if not shutil.which("claude"):
             return []
         try:
@@ -178,7 +176,7 @@ class CursorClient(BaseClient):
     display_name = "Cursor"
     description = "AI-first IDE (Cursor.app)"
 
-    def detect(self) -> Tuple[bool, str]:
+    def detect(self) -> tuple[bool, str]:
         return _detect_any(
             _detect_binary("cursor"),
             _detect_path(
@@ -187,7 +185,7 @@ class CursorClient(BaseClient):
             ),
         )
 
-    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> List[str]:
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
         path = repo / ".cursor" / "mcp.json"
         data = _read_json(path)
         data.setdefault("mcpServers", {})
@@ -199,7 +197,7 @@ class CursorClient(BaseClient):
         _write_json(path, data)
         return [str(path)]
 
-    def disconnect(self, recorded_paths=None) -> List[str]:
+    def disconnect(self, recorded_paths=None) -> list[str]:
         return _remove_skein_from_json(
             recorded_paths or [],
             ["mcpServers"],
@@ -216,7 +214,7 @@ class VsCodeClient(BaseClient):
     display_name = "VS Code / Copilot"
     description = "Visual Studio Code with GitHub Copilot Chat"
 
-    def detect(self) -> Tuple[bool, str]:
+    def detect(self) -> tuple[bool, str]:
         return _detect_any(
             _detect_binary("code"),
             _detect_path(
@@ -225,7 +223,7 @@ class VsCodeClient(BaseClient):
             ),
         )
 
-    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> List[str]:
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
         path = repo / ".vscode" / "mcp.json"
         data = _read_json(path)
         data.setdefault("mcpServers", {})
@@ -237,7 +235,7 @@ class VsCodeClient(BaseClient):
         _write_json(path, data)
         return [str(path)]
 
-    def disconnect(self, recorded_paths=None) -> List[str]:
+    def disconnect(self, recorded_paths=None) -> list[str]:
         return _remove_skein_from_json(
             recorded_paths or [],
             ["mcpServers"],
@@ -254,7 +252,7 @@ class GeminiCLIClient(BaseClient):
     display_name = "Gemini CLI"
     description = "Google's command-line Gemini agent"
 
-    def detect(self) -> Tuple[bool, str]:
+    def detect(self) -> tuple[bool, str]:
         # Do not match Antigravity's nested ~/.gemini/antigravity dir alone.
         gemini_settings = Path.home() / ".gemini" / "settings.json"
         return _detect_any(
@@ -262,7 +260,7 @@ class GeminiCLIClient(BaseClient):
             _detect_path(gemini_settings),
         )
 
-    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> List[str]:
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
         path = Path.home() / ".gemini" / "settings.json"
         data = _read_json(path)
         data.setdefault("mcpServers", {})
@@ -280,7 +278,7 @@ class GeminiCLIClient(BaseClient):
         _write_json(path, data)
         return [str(path)]
 
-    def disconnect(self, recorded_paths=None) -> List[str]:
+    def disconnect(self, recorded_paths=None) -> list[str]:
         return _remove_skein_from_json(
             recorded_paths or [],
             ["mcpServers"],
@@ -297,14 +295,14 @@ class AntigravityClient(BaseClient):
     display_name = "Antigravity"
     description = "Google's Antigravity (Electron-based agent IDE)"
 
-    def detect(self) -> Tuple[bool, str]:
+    def detect(self) -> tuple[bool, str]:
         # Only the per-user config dir is a reliable signal — having
         # /Applications/Antigravity.app present without ever launching the
         # app would be a false positive.
         ag_dir = Path.home() / ".gemini" / "antigravity"
         return _detect_path(ag_dir)
 
-    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> List[str]:
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
         ag_dir = Path.home() / ".gemini" / "antigravity"
         ag_dir.mkdir(parents=True, exist_ok=True)
         path = ag_dir / "mcp_config.json"
@@ -330,7 +328,7 @@ class AntigravityClient(BaseClient):
         _write_json(path, data)
         return [str(path)]
 
-    def disconnect(self, recorded_paths=None) -> List[str]:
+    def disconnect(self, recorded_paths=None) -> list[str]:
         return _remove_skein_from_json(
             recorded_paths or [],
             ["mcpServers"],
@@ -349,13 +347,13 @@ class OpenCodeClient(BaseClient):
     display_name = "opencode"
     description = "Open-source TUI for AI coding agents"
 
-    def detect(self) -> Tuple[bool, str]:
+    def detect(self) -> tuple[bool, str]:
         return _detect_any(
             _detect_binary("opencode"),
             _detect_path(Path.home() / ".config" / "opencode"),
         )
 
-    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> List[str]:
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
         oc_dir = Path.home() / ".config" / "opencode"
         oc_dir.mkdir(parents=True, exist_ok=True)
         path = oc_dir / "config.json"
@@ -371,7 +369,7 @@ class OpenCodeClient(BaseClient):
         _write_json(path, data)
         return [str(path)]
 
-    def disconnect(self, recorded_paths=None) -> List[str]:
+    def disconnect(self, recorded_paths=None) -> list[str]:
         return _remove_skein_from_json(
             recorded_paths or [],
             ["mcp", "servers"],
@@ -390,13 +388,13 @@ class CodexClient(BaseClient):
     display_name = "Codex CLI"
     description = "OpenAI Codex CLI / ChatGPT Desktop config"
 
-    def detect(self) -> Tuple[bool, str]:
+    def detect(self) -> tuple[bool, str]:
         return _detect_any(
             _detect_binary("codex"),
             _detect_path(Path.home() / ".codex"),
         )
 
-    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> List[str]:
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
         codex_dir = repo / ".codex"
         codex_dir.mkdir(parents=True, exist_ok=True)
         path = codex_dir / "config.toml"
@@ -425,8 +423,8 @@ class CodexClient(BaseClient):
         path.write_text(body + block)
         return [str(path)]
 
-    def disconnect(self, recorded_paths=None) -> List[str]:
-        modified: List[str] = []
+    def disconnect(self, recorded_paths=None) -> list[str]:
+        modified: list[str] = []
         candidates = [Path(p) for p in (recorded_paths or [])] or [
             Path.cwd() / ".codex" / "config.toml",
         ]
@@ -461,7 +459,7 @@ def _strip_codex_skein_block(text: str) -> str:
     blank line or top-level table header.
     """
     lines = text.splitlines(keepends=True)
-    out: List[str] = []
+    out: list[str] = []
     i = 0
     n = len(lines)
     while i < n:
@@ -470,7 +468,7 @@ def _strip_codex_skein_block(text: str) -> str:
         if stripped == "[[mcpServers]]":
             # Look ahead to see if this block is the skein one.
             j = i + 1
-            block: List[str] = [line]
+            block: list[str] = [line]
             is_skein = False
             while j < n:
                 nxt = lines[j]
@@ -509,17 +507,17 @@ def _strip_codex_skein_block(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _remove_skein_from_json(
-    recorded_paths: List[str],
-    key_chain: List[str],
-    default_paths: List[Path],
-) -> List[str]:
+    recorded_paths: list[str],
+    key_chain: list[str],
+    default_paths: list[Path],
+) -> list[str]:
     """Walk into ``data[key_chain[0]][key_chain[1]]…`` and pop ``"skein"``.
 
     Tries ``recorded_paths`` first, falls back to ``default_paths``. Always
     leaves other entries intact. Empty parents are kept (so the user can
     inspect the file later)."""
-    modified: List[str] = []
-    candidates: List[Path] = []
+    modified: list[str] = []
+    candidates: list[Path] = []
     seen = set()
     for raw in (*recorded_paths, *(str(p) for p in default_paths)):
         p = Path(raw)
@@ -548,7 +546,7 @@ def _remove_skein_from_json(
 # Registry
 # ---------------------------------------------------------------------------
 
-ALL_CLIENTS: List[BaseClient] = [
+ALL_CLIENTS: list[BaseClient] = [
     ClaudeCodeClient(),
     CursorClient(),
     VsCodeClient(),
@@ -559,18 +557,18 @@ ALL_CLIENTS: List[BaseClient] = [
 ]
 
 
-def get_client(client_id: str) -> Optional[BaseClient]:
+def get_client(client_id: str) -> BaseClient | None:
     for c in ALL_CLIENTS:
         if c.id == client_id:
             return c
     return None
 
 
-def all_ids() -> List[str]:
+def all_ids() -> list[str]:
     return [c.id for c in ALL_CLIENTS]
 
 
-def detect_all() -> List[dict]:
+def detect_all() -> list[dict]:
     """Return ``[{id, display_name, description, detected, note}]`` for every
     known client."""
     out = []

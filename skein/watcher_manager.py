@@ -25,7 +25,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
 
 from .projects import ProjectEntry
 
@@ -48,7 +47,7 @@ def log_file_for(entry: ProjectEntry) -> Path:
     return WATCHER_LOG_DIR / f"watcher-{_slug(entry.scope)}.log"
 
 
-def _read_pid(pid_file: Path) -> Optional[int]:
+def _read_pid(pid_file: Path) -> int | None:
     try:
         return int(pid_file.read_text().strip())
     except (OSError, ValueError):
@@ -81,7 +80,7 @@ def is_running(entry: ProjectEntry) -> bool:
     return True
 
 
-def spawn(entry: ProjectEntry, *, skein_bin: Optional[str] = None) -> Optional[int]:
+def spawn(entry: ProjectEntry, *, skein_bin: str | None = None) -> int | None:
     """Spawn a detached ``skein watch`` for this project.
 
     Returns the new PID, or None if a watcher is already running.
@@ -151,7 +150,7 @@ def kill(entry: ProjectEntry) -> bool:
     return True
 
 
-def kill_all() -> List[ProjectEntry]:
+def kill_all() -> list[ProjectEntry]:
     """Stop every active watcher. Returns the entries that were running."""
     from .projects import list_projects
     killed = []

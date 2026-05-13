@@ -6,14 +6,11 @@ so we can simulate timeouts, rate limits, batch shapes, and persistent failure.
 from __future__ import annotations
 
 import time
-from concurrent.futures import TimeoutError as FutureTimeout
 from types import SimpleNamespace
-from typing import Iterable, List
 
 import pytest
 
 from skein import embeddings as emb
-
 
 # ---------------------------------------------------------------------------
 # Fake SDK client
