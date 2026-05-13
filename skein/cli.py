@@ -2370,25 +2370,53 @@ def gc(yes: bool, dry_run: bool) -> None:
         ui.blank()
         deleted_frags = 0
         deleted_scopes = 0
-        for f in noise_frags:
-            storage._conn.execute("DELETE FROM fragments WHERE id = ?", (f.id,))
-            deleted_frags += 1
-        for f in old_convo_frags:
-            storage._conn.execute("DELETE FROM fragments WHERE id = ?", (f.id,))
-            deleted_frags += 1
-        if home_scope:
-            # Wipe its fragments first so the scope is truly empty
-            for f in storage.list_fragments(
-                scope_id=home_scope.id, include_stale=True, limit=100000,
-            ):
-                storage._conn.execute("DELETE FROM fragments WHERE id = ?", (f.id,))
-                deleted_frags += 1
-            storage._conn.execute("DELETE FROM scopes WHERE id = ?", (home_scope.id,))
-            deleted_scopes += 1
-        for s in empty_scopes:
-            storage._conn.execute("DELETE FROM scopes WHERE id = ?", (s.id,))
-            deleted_scopes += 1
-        storage._conn.commit()
+
+        storage.begin_immediate()
+        try:
+            # Batching to avoid SQLITE_MAX_VARIABLE_NUMBER (typically 999)
+            BATCH_SIZE = 999
+
+            if noise_frags:
+                for i in range(0, len(noise_frags), BATCH_SIZE):
+                    batch = [f.id for f in noise_frags[i : i + BATCH_SIZE]]
+                    placeholders = ",".join("?" * len(batch))
+                    cur = storage._conn.execute(
+                        f"DELETE FROM fragments WHERE id IN ({placeholders})", batch
+                    )
+                    deleted_frags += cur.rowcount
+
+            if old_convo_frags:
+                for i in range(0, len(old_convo_frags), BATCH_SIZE):
+                    batch = [f.id for f in old_convo_frags[i : i + BATCH_SIZE]]
+                    placeholders = ",".join("?" * len(batch))
+                    cur = storage._conn.execute(
+                        f"DELETE FROM fragments WHERE id IN ({placeholders})", batch
+                    )
+                    deleted_frags += cur.rowcount
+
+            if home_scope:
+                # Wipe its fragments first so the scope is truly empty.
+                # Optimized: single DELETE instead of fetching 100k rows.
+                cur = storage._conn.execute(
+                    "DELETE FROM fragments WHERE scope_id = ?", (home_scope.id,)
+                )
+                deleted_frags += cur.rowcount
+                storage._conn.execute("DELETE FROM scopes WHERE id = ?", (home_scope.id,))
+                deleted_scopes += 1
+
+            if empty_scopes:
+                for i in range(0, len(empty_scopes), BATCH_SIZE):
+                    batch = [s.id for s in empty_scopes[i : i + BATCH_SIZE]]
+                    placeholders = ",".join("?" * len(batch))
+                    storage._conn.execute(
+                        f"DELETE FROM scopes WHERE id IN ({placeholders})", batch
+                    )
+                    deleted_scopes += len(batch)
+
+            storage.commit_immediate()
+        except Exception:
+            storage.rollback_immediate()
+            raise
 
         ui.step(f"Deleted {deleted_scopes} scopes, {deleted_frags} fragments",
                 state="ok")
