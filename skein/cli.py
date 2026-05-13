@@ -1548,6 +1548,82 @@ def remember(
 # ---------------------------------------------------------------------------
 
 @main.command()
+@click.option("--scope", default=None, help="Scope handle (default from config).")
+@click.option("--type", "type_filter", default=None, help="Filter by fragment type.")
+@click.option("--limit", "-n", default=20, show_default=True)
+@click.option("--json", "output_json", is_flag=True, default=False)
+def history(
+    scope: Optional[str],
+    type_filter: Optional[str],
+    limit: int,
+    output_json: bool,
+) -> None:
+    """Display a reverse-chronological list of the most recent context fragments.
+
+    \b
+    Examples:
+        skein history
+        skein history --type decision
+        skein history --limit 50
+    """
+    cfg = _get_config()
+    scope_handle = _resolve_scope(scope)
+
+    with _client() as client:
+        _require_running(client)
+
+        params: dict = {
+            "scope": scope_handle,
+            "limit": limit,
+            "include_stale": "true",
+        }
+        if type_filter:
+            params["type"] = type_filter
+
+        resp = client.get("/v1/fragments", params=params)
+
+    if resp.status_code != 200:
+        err_console.print(f"[red]✗[/red] Error {resp.status_code}: {resp.text}")
+        sys.exit(1)
+
+    data = resp.json()
+    if output_json:
+        print(json.dumps(data, indent=2))
+        return
+
+    if not data:
+        console.print("[dim]No history found.[/dim]")
+        return
+
+    from rich.table import Table
+
+    table = Table(box=None, header_style="dim", padding=(0, 2))
+    table.add_column("Time", style="dim")
+    table.add_column("Type", style="cyan")
+    table.add_column("Scope")
+    table.add_column("Territory", style="dim")
+    table.add_column("Preview")
+
+    for f in data:
+        time_str = f.get("created_at", "")[:16].replace("T", " ")
+        frag_type = f.get("type", "")
+        frag_scope = f.get("scope_id", "").replace("project:", "")
+        territory = f.get("territory") or "-"
+
+        content = f.get("content", "")
+        # Truncate content for preview (60 chars)
+        preview = content.replace("\n", " ")
+        if len(preview) > 60:
+            preview = preview[:60] + "…"
+
+        table.add_row(time_str, frag_type, frag_scope, territory, preview)
+
+    console.print()
+    console.print(table)
+    console.print()
+
+
+@main.command()
 @click.argument("query")
 @click.option("--scope", default=None, help="Scope handle (default from config).")
 @click.option("--type", "types", multiple=True,
