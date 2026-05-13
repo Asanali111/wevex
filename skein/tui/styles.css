@@ -1,0 +1,203 @@
+/* Skein TUI — Textual CSS.
+
+Aesthetic: matches the iter-20 marketing site palette.
+  Accent (active tab, primary button, healthy dot): #d97757 (warm coral)
+  Errors / red dot:                                  #c75450
+  Healthy dot:                                       #7ec27e
+  Dim text:                                          terminal default + `dim`
+
+Backgrounds inherit the terminal theme (dark or light) — we don't force one.
+*/
+
+Screen {
+    background: $background;
+}
+
+HealthHeader {
+    dock: top;
+    height: 1;
+}
+
+#daemon-banner {
+    dock: top;
+    height: auto;
+    padding: 1 2;
+    background: #3a1818;
+    color: #ffd0c0;
+    border: round #d97757;
+    text-align: center;
+}
+
+#daemon-banner.-hidden {
+    display: none;
+}
+
+TabbedContent {
+    height: 1fr;
+}
+
+TabbedContent > Tabs {
+    background: $surface;
+}
+
+TabbedContent > Tabs > Tab {
+    color: $text-muted;
+    padding: 0 2;
+}
+
+TabbedContent > Tabs > Tab.-active {
+    color: #d97757;
+    text-style: bold;
+}
+
+Footer {
+    background: $surface;
+    color: $text-muted;
+}
+
+/* Briefing screen */
+
+#briefing-header {
+    height: 3;
+    padding: 1 2;
+    color: $text;
+    text-style: bold;
+}
+
+#briefing-stats {
+    padding: 1 2;
+    border: round #d97757;
+    margin: 1 2;
+    height: auto;
+}
+
+#briefing-counts {
+    height: 12;
+    margin: 0 2;
+    border: round $primary-background;
+}
+
+#briefing-decisions {
+    margin: 0 2 1 2;
+    border: round $primary-background;
+    height: 1fr;
+}
+
+#briefing-action {
+    margin: 1 2;
+    padding: 1 2;
+    background: $surface;
+    border: round #d97757;
+    color: $text;
+    height: auto;
+}
+
+/* Fragments screen */
+
+#fragments-search-bar {
+    height: 3;
+    padding: 0 2;
+    margin: 1 2 0 2;
+}
+
+#fragments-search-input {
+    width: 1fr;
+}
+
+#fragments-results {
+    margin: 1 2;
+    border: round $primary-background;
+    height: 1fr;
+}
+
+#fragments-status {
+    margin: 0 2;
+    height: 1;
+    color: $text-muted;
+}
+
+/* Inbox screen */
+
+#inbox-list {
+    margin: 1 2;
+    border: round $primary-background;
+    height: 1fr;
+}
+
+#inbox-status {
+    margin: 0 2 1 2;
+    height: 1;
+    color: $text-muted;
+}
+
+/* Events screen */
+
+#events-log {
+    margin: 1 2;
+    border: round $primary-background;
+    height: 1fr;
+}
+
+#events-status {
+    margin: 0 2 1 2;
+    height: 1;
+    color: $text-muted;
+}
+
+/* Clients screen */
+
+#clients-table {
+    margin: 1 2;
+    border: round $primary-background;
+    height: 1fr;
+}
+
+/* Help modal */
+
+HelpModal {
+    align: center middle;
+}
+
+#help-dialog {
+    width: 70%;
+    max-width: 90;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: round #d97757;
+    background: $surface;
+}
+
+#help-title {
+    text-align: center;
+    text-style: bold;
+    color: #d97757;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#help-body {
+    height: auto;
+}
+
+#help-footer {
+    text-align: center;
+    color: $text-muted;
+    margin-top: 1;
+    height: 1;
+}
+
+/* Fragment detail modal */
+
+FragmentDetailModal {
+    align: center middle;
+}
+
+#fragment-detail-dialog {
+    width: 80%;
+    max-width: 120;
+    height: 80%;
+    padding: 1 2;
+    border: round #d97757;
+    background: $surface;
+}
