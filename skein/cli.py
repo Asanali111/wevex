@@ -3949,3 +3949,35 @@ def tail(
     except FileNotFoundError:
         # File rotated mid-follow; bail rather than spin
         err_console.print("[yellow]Event log rotated; exiting follow.[/yellow]")
+
+
+# ---------------------------------------------------------------------------
+# tui — Textual control-panel
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.option("--scope", default=None,
+              help="Scope handle (default: auto-resolve like every other command).")
+def tui(scope: Optional[str]) -> None:
+    """Launch the Skein control-panel TUI.
+
+    A single-window Textual app with five tabs:
+
+    \b
+      1. Briefing  — project dashboard (default tab)
+      2. Fragments — recall / hybrid search
+      3. Inbox     — pending extraction candidates
+      4. Events    — live event log tail
+      5. Clients   — wired LLM client status
+
+    Press [?] at any time for the chord-shortcut reference.
+    """
+    try:
+        from .tui.app import SkeinApp
+    except ImportError as e:
+        err_console.print(
+            f"[red]✗[/red] Could not load the TUI: {e}\n"
+            "Install the `textual` extra with [bold]pip install textual>=0.80[/bold]."
+        )
+        sys.exit(1)
+    SkeinApp(scope=scope).run()
