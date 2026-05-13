@@ -539,7 +539,6 @@ def up(
         from .scanner import scan_project
         from .passive import promote_scanned_facts
         from .config import get_config as _gc
-        from .dependencies import get_storage as _gs, get_provider as _gp
         # Re-open storage briefly for the scan since we just closed it above
         cfg2 = _gc()
         from .storage import Storage as _Storage
