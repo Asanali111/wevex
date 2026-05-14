@@ -50,3 +50,6 @@ Thumbs.db
 .idea/
 *.swp
 *~
+
+# Website moved to ~/Documents/skein-website/ for separate hosting (iter 20.1)
+website/
