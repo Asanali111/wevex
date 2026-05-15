@@ -43,12 +43,23 @@ One local daemon. Every coding client connects via MCP (or AGENTS.md for non-MCP
 **Two commands.** That's it.
 
 ```bash
-# 1. Install (once)
-curl -fsSL https://raw.githubusercontent.com/ameliomar/skein/main/bin/install.sh | sh
+# 1. Install (once) — package is `skn`, CLI is `skein`
+pip install skn
 
 # 2. Activate in any project
 cd ~/Documents/your-project
 skein up
+```
+
+The PyPI package is named **`skn`** because the natural guess `skein` is already taken by an unrelated Apache project. The CLI binary stays `skein` — install with `skn`, run with `skein`.
+
+Other install paths that work the same:
+
+```bash
+pipx install skn          # recommended for CLI tools — isolated env, auto-PATH
+uv tool install skn       # modern, fastest
+pip3 install skn          # macOS users where `pip` points at Python 2
+py -m pip install skn     # Windows
 ```
 
 After `skein up`, every connected LLM (Claude Code, Cursor, Codex, Gemini CLI, Antigravity, Copilot, VS Code, opencode) automatically has shared context for the project. The daemon runs as a background service that survives terminal close and reboots (launchd on macOS, systemd-user on Linux, nohup elsewhere).

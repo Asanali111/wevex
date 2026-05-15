@@ -3,7 +3,11 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "skein"
+# Published to PyPI as `skn` because `skein` is taken by an unrelated Apache
+# project (Hadoop YARN deployer). The CLI command remains `skein` — see
+# [project.scripts] below. Users install with `pip install skn`, run with
+# `skein up`.
+name = "skn"
 version = "0.1.0"
 description = "Local MCP context bus for coding LLMs (Claude Code, Cursor, Codex, Gemini CLI, Antigravity, Copilot, VS Code, opencode)."
 readme = "README.md"
@@ -60,8 +64,8 @@ dev = [
 skein = "skein.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/ameliomar/skein"
-Documentation = "https://github.com/ameliomar/skein/blob/main/README.md"
+Homepage = "https://github.com/Asanali111/skein"
+Documentation = "https://github.com/Asanali111/skein/blob/main/README.md"
 
 [tool.setuptools.packages.find]
 where = ["."]
