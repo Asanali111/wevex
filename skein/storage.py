@@ -586,6 +586,22 @@ class Storage:
             "AND (expires_at IS NULL OR expires_at > datetime('now'))"
         ).fetchone()[0]
 
+    def peek_embedding_dimension(self) -> Optional[int]:
+        """Return the dimension of the first non-null embedding in the DB, or None.
+
+        Used at daemon startup (iter 23) to detect a provider/storage mismatch:
+        if the active embedding provider's dimension differs from what's
+        stored, recall results will be nonsense until `skein ingest . --reset`.
+        Stored as raw float32 bytes, so dimension = len(bytes) / 4.
+        """
+        row = self._conn.execute(
+            "SELECT content_embedding FROM fragments "
+            "WHERE content_embedding IS NOT NULL LIMIT 1"
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return len(row[0]) // 4
+
     def count_fragments_in_scope(self, scope_id: str, include_stale: bool = False) -> int:
         """Cheap existence check used by hot-path hooks to early-exit when the
         scope has no fragments — avoids the embedding+BM25+vector roundtrip."""
