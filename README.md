@@ -85,31 +85,37 @@ skein daemon status   # see what's running
 skein daemon logs     # tail the daemon log
 ```
 
-### After `skein up` — explore the data
+### After `skein up` — day-to-day usage
+
+Skein is meant to be invisible. Most work happens through MCP tools your LLM already calls — `recall`, `remember`, `note_decision`, `search_code`, `boost`, `bury`, `archaeology`, `supersede` — so the user surface is small on purpose. The five CLI commands you'll actually reach for:
 
 ```bash
-# Store typed context
-skein remember "use Redis for session caching" --type decision
-skein note "use PostgreSQL as primary DB" \
-    --alternatives "MySQL, SQLite" \
-    --rationale "better JSON support and pgvector extension"
-skein remember "API rate limit is 1000 req/min" --type fact --territory backend/api
+# See what's wired up
+skein status
 
-# Search typed context
-skein recall "caching strategy"
-skein recall "database" --type decision --limit 5
-
-# Search the codebase
-skein search "how does authentication work"
-skein search "rate limiting" --language python
-
-# Multi-agent coordination
-skein lease "backend/auth/**" --reason "refactoring auth"
-skein leases
-
-# Diagnose
+# Deep diagnostic (folds in the old `clients`, `events`, `chunks stats`,
+# `projects list`, `daemon status`, value-distribution, inbox depth)
 skein doctor
+
+# What's the project state?
+skein briefing
+skein briefing --since 2d        # what changed in the last 2 days
+
+# Live event stream
+skein tail
+
+# Interactive control panel
+skein tui
 ```
+
+`skein doctor` has two action flags that absorb what used to be standalone commands:
+
+```bash
+skein doctor --clean       # interactive cleanup (replaces `skein gc`)
+skein doctor --reingest    # re-index the cwd (replaces `skein ingest`)
+```
+
+The daemon takes care of everything else automatically — AGENTS.md regen, TTL gc, docs sync, inbox auto-approve. You don't run a sync command; the file just stays current.
 
 ---
 
@@ -130,54 +136,47 @@ skein doctor
 
 ## CLI reference
 
+The visible surface is intentionally small — Skein is an invisible helper, not a CLI suite to learn. Ten commands cover everything a human needs:
+
 ```
-skein up                  One-command bootstrap: init + daemon + hooks + sync + ingest + watcher
-skein down                Stop daemon, kill watcher, uninstall hooks from this project
-skein restart             Restart the persistent daemon
-skein watch <path>        Foreground watcher (called by skein up; debug-friendly)
-skein projects list       Active projects + watcher status
-skein projects remove     Unregister a project
-skein daemon status       Show daemon backend, PID, and health
-skein daemon logs         Tail ~/.config/skein/logs/daemon.{out,err}
-skein init                Lower-level: generate token, create config (skein up does this)
-skein serve               Lower-level: run the daemon in foreground
-skein sync                Lower-level: only write MCP configs (no daemon, no hooks)
-skein hooks install       Lower-level: only install hooks (no daemon, no sync)
-skein hooks list          Show installed hooks (project + global)
-skein hooks uninstall     Remove Skein-managed hooks (keeps user-added)
-skein remember            Store a fragment
-skein recall              Search fragments (hybrid BM25 + vector + RRF)
-skein note                Record a decision (--alternatives / --rationale)
-skein ingest <path>       Index a directory of code/docs for RAG
-skein search "<query>"    Hybrid BM25+vector search over indexed code
-skein chunks stats        Show how much code is indexed
-skein chunks list         List indexed chunks for inspection
-skein chunks delete-root  Delete all chunks under a source_root
-skein lease               Acquire an advisory lease on a file-glob
-skein leases              List active leases
-skein agents-md           Print/write the rendered AGENTS.md
-skein status              Show daemon stats
-skein doctor              Diagnose config issues across all sync targets
-skein config show         Print current config (token redacted)
-skein config set          Update a config key
-skein scope create        Create a new scope
-skein scope list          List all scopes
+skein up [path]    Start the daemon, register cwd, wire up detected clients
+skein down         Stop daemon + watcher, uninstall hooks
+skein restart      Restart the daemon
+skein status       One-screen health: daemon, clients, fragment + chunk counts
+skein doctor       Deep diagnostic. Flags: --clean / --reingest / --perf
+skein tail         Live event stream
+skein briefing     Project state. With --since <when>, becomes the diff feed
+skein tui          Interactive control panel
+skein config       View or set runtime configuration
+skein connect      Wire installed LLM tools through Skein. --remove disconnects
 ```
 
-Every command accepts `--json` for machine-readable output.
+What the daemon does automatically (no command, no maintenance):
+
+- Regenerates `AGENTS.md` for each registered project when fragments change.
+- Drains the extraction-candidate inbox: auto-approves above the confidence threshold, auto-rejects items older than 14 days that didn't clear.
+- Sweeps expired TTLs (lease + fragment stale-mark).
+- Tails docs (README/CHANGELOG/ADRs) into fragments via the docs watcher.
+
+Need a fine-grained command from a previous version? Most still work but are hidden from `--help` and will be removed in a follow-up — prefer the MCP tool path (`recall`, `remember`, `note_decision`, `boost`, `bury`, `archaeology`, `supersede`) for anything an LLM session needs to do.
 
 ---
 
 ## MCP tools (for Claude Code, Cursor, Codex, etc.)
 
-Once `skein sync` runs, every MCP-capable client gets these tools:
+Once `skein up` runs and your client is connected, every MCP-capable LLM gets these tools:
 
 | Tool | Description |
 |---|---|
+| `project_briefing(scope?)` | One-call project dashboard (300 tokens, <50ms) |
 | `recall(query, scope, types?, limit?)` | Search for relevant context fragments |
 | `recall_one(fragment_id)` | Full content of a specific fragment |
 | `remember(content, type, scope, territory?, tags?)` | Store context |
-| `note_decision(content, scope, alternatives?, rationale?)` | Record a decision |
+| `note_decision(content, scope, alternatives?, rationale?)` | Record a decision with structure |
+| `supersede(old_id, new_content, reason?, type?, tags?)` | Retire a fragment + create its replacement atomically |
+| `boost(fragment_id, value?)` | Pin a fragment to high recall-value when the user says "this is important" |
+| `bury(fragment_id)` | Floor a fragment's value when the user says "this is wrong" — kept in audit, hidden from recall |
+| `archaeology(query, scope?, limit?)` | Reconstruct a decision's provenance (session, commit, supersede chain) |
 | `search_code(query, scope, languages?, source_root?, limit?)` | Hybrid search over the ingested codebase |
 | `claim_lease(glob, scope, ttl_seconds?)` | Advisory lock on file-glob |
 | `release_lease(lease_id)` | Release a lease |

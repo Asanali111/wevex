@@ -20,7 +20,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
-from functools import lru_cache
 from typing import Optional
 
 from fastapi import Depends, Header, HTTPException, Request, status

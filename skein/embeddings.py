@@ -25,11 +25,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import math
 import os
 import time
 from concurrent.futures import TimeoutError as FutureTimeout
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 # Numpy is lazy-loaded inside the functions that actually use it. At ~250 ms
 # import cost, it dominates daemon boot when only a fraction of requests touch
@@ -59,10 +58,10 @@ class EmbeddingProvider:
     # to FTS5/BM25. ``skein doctor`` and the README rely on this marker.
     is_real: bool = False
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         raise NotImplementedError
 
-    def embed_one(self, text: str) -> List[float]:
+    def embed_one(self, text: str) -> list[float]:
         return self.embed([text])[0]
 
 
@@ -83,7 +82,7 @@ class BM25OnlyProvider(EmbeddingProvider):
     dimension: int = 768
     is_real: bool = False     # Marker the doctor / hooks can check
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         # Zero vectors. Stored embeddings will all be the zero vector,
         # which produces zero cosine similarity to everything — vector
         # search effectively becomes a no-op for ranking purposes.
@@ -108,7 +107,7 @@ class HashEmbeddingProvider(EmbeddingProvider):
 
     dimension: int = 768
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         results = []
         for text in texts:
             vec = self._hash_to_vec(text)
@@ -116,10 +115,10 @@ class HashEmbeddingProvider(EmbeddingProvider):
         return results
 
     @staticmethod
-    def _hash_to_vec(text: str, dim: int = 768) -> List[float]:
+    def _hash_to_vec(text: str, dim: int = 768) -> list[float]:
         # Build a deterministic float vector from repeated SHA-256 hashing.
         seed = text.encode("utf-8")
-        floats: List[float] = []
+        floats: list[float] = []
         counter = 0
         while len(floats) < dim:
             digest = hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()
@@ -244,7 +243,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
     # Public API
     # ------------------------------------------------------------------
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
         self.degraded = False
@@ -265,7 +264,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
     # Batch path
     # ------------------------------------------------------------------
 
-    def _try_batch(self, texts: List[str]) -> Optional[List[List[float]]]:
+    def _try_batch(self, texts: list[str]) -> Optional[list[list[float]]]:
         """Single HTTP call for the whole list. Returns None if the SDK
         rejects the list shape (we then fall back to per-text)."""
         try:
@@ -299,8 +298,8 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
     # Per-text fallback (with retry + degrade)
     # ------------------------------------------------------------------
 
-    def _embed_per_text(self, texts: List[str]) -> List[List[float]]:
-        results: List[List[float]] = []
+    def _embed_per_text(self, texts: list[str]) -> list[list[float]]:
+        results: list[list[float]] = []
         consecutive_failures = 0
 
         for i, text in enumerate(texts):
@@ -326,7 +325,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
 
         return results
 
-    def _embed_one_with_retry(self, text: str) -> Optional[List[float]]:
+    def _embed_one_with_retry(self, text: str) -> Optional[list[float]]:
         last_err: Optional[Exception] = None
         for attempt in range(self.MAX_RETRIES + 1):
             try:
@@ -358,8 +357,8 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         cancellation). Raises FutureTimeout on expiry.
         """
         import threading
-        result: List = [None]
-        error: List[Optional[BaseException]] = [None]
+        result: list = [None]
+        error: list[Optional[BaseException]] = [None]
 
         def runner():
             try:
@@ -428,7 +427,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
                 "openai package is required. Install it: pip install openai"
             ) from e
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         resp = self._client.embeddings.create(model=self.model, input=texts)
         return [item.embedding for item in sorted(resp.data, key=lambda x: x.index)]
 
@@ -506,7 +505,7 @@ def cosine_similarity(a: "np.ndarray", b: "np.ndarray") -> float:
     return float(np.dot(a, b) / (norm_a * norm_b))
 
 
-def vec_to_bytes(vec: List[float]) -> bytes:
+def vec_to_bytes(vec: list[float]) -> bytes:
     """Serialize a float list to raw float32 bytes for SQLite BLOB storage."""
     import numpy as np
     return np.array(vec, dtype=np.float32).tobytes()

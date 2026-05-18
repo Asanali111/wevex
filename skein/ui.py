@@ -19,8 +19,7 @@ to override (used in tests and for `--json` paths that route to stderr).
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, Optional, Sequence
 
 from rich.console import Console
 
@@ -101,7 +100,7 @@ def field(label: str, value: str, *, label_width: int = 12, indent: int = 2) -> 
 
 
 def fields(
-    pairs: Sequence[Tuple[str, str]],
+    pairs: Sequence[tuple[str, str]],
     *,
     label_width: Optional[int] = None,
     indent: int = 2,
@@ -140,7 +139,7 @@ def step(text: str, *, state: str = "ok", detail: Optional[str] = None,
 # ---------------------------------------------------------------------------
 
 def status_list(
-    rows: Iterable[Tuple[str, str, str, str]],
+    rows: Iterable[tuple[str, str, str, str]],
     *,
     indent: int = 2,
 ) -> None:
@@ -211,7 +210,7 @@ def home_relative(path: str) -> str:
 # Status counter line — dim summary footer
 # ---------------------------------------------------------------------------
 
-def counter_line(parts: Sequence[Tuple[int, str]], *, indent: int = 2) -> None:
+def counter_line(parts: Sequence[tuple[int, str]], *, indent: int = 2) -> None:
     """Print ``  3 detected · 2 connected · 4 not installed``.
 
     Each (n, label) becomes ``n label``. Empty-counter parts are dropped."""

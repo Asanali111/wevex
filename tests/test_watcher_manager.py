@@ -94,23 +94,38 @@ class _FakeProc:
 
 class TestSpawn:
     def test_writes_pid_file(self, isolated, entry, monkeypatch):
+        import sys
+
         captured = {}
         def fake_popen(cmd, **kwargs):
             captured["cmd"] = cmd
             captured["new_session"] = kwargs.get("start_new_session")
+            captured["creationflags"] = kwargs.get("creationflags", 0)
             return _FakeProc(pid=42)
         monkeypatch.setattr("subprocess.Popen", fake_popen)
-        # Pretend skein binary exists
+        # Pretend skein binary exists. Use the platform's "everything is
+        # always on disk" sentinel so we don't depend on a real layout.
         monkeypatch.setattr("pathlib.Path.is_file", lambda self: True)
 
-        pid = watcher_manager.spawn(entry, skein_bin="/usr/local/bin/skein")
+        sentinel_bin = (
+            "C:\\Skein\\skein.exe" if sys.platform.startswith("win")
+            else "/usr/local/bin/skein"
+        )
+        pid = watcher_manager.spawn(entry, skein_bin=sentinel_bin)
         assert pid == 42
         assert watcher_manager.pid_file_for(entry).read_text() == "42"
-        assert captured["cmd"][0] == "/usr/local/bin/skein"
+        assert captured["cmd"][0] == sentinel_bin
         assert captured["cmd"][1] == "watch"
         assert "--scope" in captured["cmd"]
         assert "project:myproj" in captured["cmd"]
-        assert captured["new_session"] is True
+        # Iter 27 Windows port: detach mechanic is platform-specific.
+        # POSIX uses start_new_session=True; Windows uses
+        # CREATE_NEW_PROCESS_GROUP in creationflags.
+        if sys.platform.startswith("win") or os.name == "nt":
+            import subprocess
+            assert captured["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            assert captured["new_session"] is True
 
     def test_returns_none_when_already_running(self, isolated, entry, monkeypatch):
         # Plant a live PID file

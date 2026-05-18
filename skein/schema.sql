@@ -99,6 +99,13 @@ CREATE TABLE IF NOT EXISTS fragments (
   superseded_by_fragment_id TEXT REFERENCES fragments(id),
   extraction_method        TEXT NOT NULL DEFAULT 'explicit',  -- explicit | code-scan | transcript-claude | …
   extraction_confidence    REAL,                 -- 1.0 for explicit; <1.0 for auto-extracted
+  -- Iter 25 (Q-05 phase 1+2): cheap deterministic "is this fragment worth
+  -- recalling?" score derived from provenance + type + content rubrics at
+  -- write-time. Multiplied into the final RRF score in retrieval so noisy
+  -- fragments fall to the bottom without being deleted. Range [0.05, 1.0];
+  -- 0.5 is the neutral default for fragments created before the column
+  -- existed.
+  value            REAL NOT NULL DEFAULT 0.5,
   created_at       TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -112,6 +119,7 @@ CREATE INDEX IF NOT EXISTS idx_fragments_supersedes ON fragments(supersedes_frag
 CREATE INDEX IF NOT EXISTS idx_fragments_superseded_by ON fragments(superseded_by_fragment_id) WHERE superseded_by_fragment_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_fragments_tool     ON fragments(created_by_tool) WHERE created_by_tool IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_fragments_method   ON fragments(extraction_method);
+CREATE INDEX IF NOT EXISTS idx_fragments_value    ON fragments(value);
 
 -- FTS5 virtual table for full-text (BM25-like) search
 CREATE VIRTUAL TABLE IF NOT EXISTS fragments_fts
@@ -276,6 +284,22 @@ CREATE INDEX IF NOT EXISTS idx_candidates_tool ON extraction_candidates(source_t
 -- Dedupe: same content + scope + source_file shouldn't pile up
 CREATE UNIQUE INDEX IF NOT EXISTS uq_candidates_dedup
   ON extraction_candidates(scope_id, content, source_tool);
+
+-- ---------------------------------------------------------------------------
+-- AGENTS.md render state (iter 26 / ADR-002)
+-- Daemon auto-sync watches the fragment set for changes and regenerates the
+-- per-project AGENTS.md when the rendered output's hash differs from
+-- whatever was last written. Replaces the manual `skein sync` command.
+-- One row per (scope, on-disk path). last_render_hash is sha256 over the
+-- exact bytes written to disk; mismatch = "fragments changed, regen".
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agents_md_state (
+  scope_handle      TEXT NOT NULL,
+  file_path         TEXT NOT NULL,
+  last_render_hash  TEXT NOT NULL,
+  last_render_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (scope_handle, file_path)
+);
 
 -- ---------------------------------------------------------------------------
 -- Transcript cursors (iter 14.2)

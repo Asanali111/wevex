@@ -10,9 +10,11 @@ Three backends, picked in this order:
      and ``launchctl bootstrap``s the user agent.
   2. **systemd-user** (Linux): writes ~/.config/systemd/user/skein.service
      and ``systemctl --user enable --now``s it.
-  3. **nohup** (anything else, or as a forced fallback): spawns a detached
-     process and stores the PID at ``~/.config/skein/daemon.pid``. Survives
-     terminal close but **not** reboot — there's no native auto-start.
+  3. **nohup** (Windows + Linux-without-systemd + macOS with ``--no-persist``):
+     spawns a detached process via :mod:`skein._proc` and stores the PID at
+     the per-user state dir's ``daemon.pid``. Survives terminal close but
+     **not** reboot — there's no native auto-start. On Windows, restart-on-
+     login can be added later via a Scheduled Task pointing at ``skein up``.
 
 The manager is idempotent. Calling ``ensure_running()`` when the daemon is
 already up is a no-op.
@@ -24,7 +26,6 @@ from __future__ import annotations
 import logging
 import os
 import platform
-import signal
 import shutil
 import subprocess
 import sys
@@ -33,20 +34,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from . import _proc, paths as _skein_paths
+
 logger = logging.getLogger("skein.daemon")
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
+# launchd and systemd paths are intrinsically platform-specific (the
+# launchd backend is only ever invoked when ``platform.system() == "Darwin"``;
+# the systemd backend gated by ``shutil.which("systemctl")``). They stay at
+# their native locations regardless of where Skein's data dir is.
 LAUNCHD_LABEL = "com.skein.daemon"
 LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 
 SYSTEMD_UNIT_NAME = "skein.service"
 SYSTEMD_UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / SYSTEMD_UNIT_NAME
 
-NOHUP_PID_FILE = Path.home() / ".config" / "skein" / "daemon.pid"
-DAEMON_LOG_DIR = Path.home() / ".config" / "skein" / "logs"
+# Nohup PID + log dir live under SKEIN_HOME — these *do* move on Windows
+# (to %APPDATA%\skein\). See skein/paths.py.
+NOHUP_PID_FILE = _skein_paths.daemon_pid_file()
+DAEMON_LOG_DIR = _skein_paths.daemon_log_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +203,7 @@ def current_status(base_url: str = "") -> DaemonStatus:
 
 # Cached backend label — written once on successful ensure_running(),
 # read on every status check to avoid the launchctl probe.
-_BACKEND_CACHE_FILE = Path.home() / ".config" / "skein" / "backend"
+_BACKEND_CACHE_FILE = _skein_paths.backend_cache_file()
 
 
 def _cached_backend() -> Optional[str]:
@@ -249,6 +258,9 @@ def _pick_backend(*, persist: bool) -> str:
         return "launchd"
     if sys_name == "Linux" and shutil.which("systemctl"):
         return "systemd"
+    # Windows + Linux-without-systemd land here. Windows-on-nohup survives
+    # terminal close (DETACHED_PROCESS) but not reboot; reboot persistence
+    # is a follow-up via Windows Task Scheduler.
     return "nohup"
 
 
@@ -427,10 +439,11 @@ def _read_pid_for_backend(method: str) -> Optional[int]:
     if method == "nohup" and NOHUP_PID_FILE.exists():
         try:
             pid = int(NOHUP_PID_FILE.read_text().strip())
-            os.kill(pid, 0)  # raises if dead
-            return pid
-        except Exception:
+        except (OSError, ValueError):
             return None
+        # _proc.pid_alive handles Windows (where os.kill(pid, 0) raises
+        # OSError("Invalid argument") instead of doing the check).
+        return pid if _proc.pid_alive(pid) else None
     if method == "launchd":
         out = subprocess.run(
             ["launchctl", "list"], capture_output=True, text=True,
@@ -615,42 +628,34 @@ def _uninstall_systemd(silent: bool = False) -> None:
 
 def _start_nohup(skein_bin: str) -> None:
     DAEMON_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    # Open the log files, hand them to the child, then close the parent's
-    # duplicates so we don't leak FDs (Popen dup's into the child).
+    # Open log files, hand them to the child via spawn_detached, then let
+    # the with-block close the parent's dup'd handles. The cross-platform
+    # spawn is in skein/_proc.py — uses start_new_session on POSIX,
+    # CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS on Windows.
     with open(DAEMON_LOG_DIR / "daemon.out", "ab") as log_out, \
          open(DAEMON_LOG_DIR / "daemon.err", "ab") as log_err:
-        proc = subprocess.Popen(
+        pid = _proc.spawn_detached(
             [skein_bin, "serve"],
-            stdout=log_out, stderr=log_err, stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
+            stdout=log_out, stderr=log_err,
         )
-    NOHUP_PID_FILE.write_text(str(proc.pid))
+    NOHUP_PID_FILE.write_text(str(pid))
 
 
 def _stop_nohup(silent: bool = False) -> None:
     if not NOHUP_PID_FILE.exists():
         return
+    pid: Optional[int] = None
     try:
         pid = int(NOHUP_PID_FILE.read_text().strip())
-        os.kill(pid, signal.SIGTERM)
-        # Wait briefly then SIGKILL if still alive
-        for _ in range(20):
-            try:
-                os.kill(pid, 0)
-                time.sleep(0.1)
-            except ProcessLookupError:
-                break
-        else:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-    except (ValueError, ProcessLookupError):
+    except (OSError, ValueError):
         if not silent:
             raise
-    finally:
-        try:
-            NOHUP_PID_FILE.unlink()
-        except OSError:
-            pass
+    # _proc.terminate_pid handles SIGTERM/SIGKILL on POSIX,
+    # CTRL_BREAK_EVENT/TerminateProcess on Windows. Treats
+    # "already-gone" as success.
+    if pid is not None:
+        _proc.terminate_pid(pid, timeout=2.0)
+    try:
+        NOHUP_PID_FILE.unlink()
+    except OSError:
+        pass

@@ -23,13 +23,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Optional
 
 from .scanner import ScannedFact
 
@@ -47,7 +45,7 @@ def default_claude_code_root() -> Path:
 
 
 def transcripts_for_project(cwd: Path,
-                             root: Optional[Path] = None) -> List[Path]:
+                             root: Optional[Path] = None) -> list[Path]:
     """All transcript files for the given project working directory.
 
     Claude Code encodes the project path by replacing ``/`` with ``-`` and
@@ -145,7 +143,7 @@ class ExtractionPattern:
 # discards. Tune via testing.
 # ---------------------------------------------------------------------------
 
-_PATTERNS: List[ExtractionPattern] = [
+_PATTERNS: list[ExtractionPattern] = [
     # "let's use X" / "let us use X" — high signal, user-stated decision
     ExtractionPattern(
         pattern=re.compile(
@@ -241,9 +239,9 @@ def _scrub_secrets(text: str) -> str:
     return text
 
 
-def extract_from_message(msg: ParsedMessage) -> List[ScannedFact]:
+def extract_from_message(msg: ParsedMessage) -> list[ScannedFact]:
     """Run every pattern over one parsed message. Returns 0+ candidate facts."""
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     text = _scrub_secrets(msg.text)
     if "[REDACTED-SECRET]" in text:
         # We don't try to extract from messages that contained secrets; risk
@@ -279,7 +277,7 @@ def extract_from_message(msg: ParsedMessage) -> List[ScannedFact]:
     return out
 
 
-def extract_from_text(text: str, role: str = "user") -> List[ScannedFact]:
+def extract_from_text(text: str, role: str = "user") -> list[ScannedFact]:
     """Convenience wrapper used by tests."""
     return extract_from_message(ParsedMessage(role=role, text=text))
 
@@ -373,7 +371,7 @@ class ClaudeCodeTranscriptWatcher:
             cursor = 0
         new_msgs = 0
         new_cursor = cursor
-        candidates: List[ScannedFact] = []
+        candidates: list[ScannedFact] = []
         try:
             with open(path, "rb") as f:
                 f.seek(cursor)
@@ -493,9 +491,9 @@ class MultiProjectTranscriptWatcher:
                 logger.debug("multi watcher poll failed", exc_info=True)
             self._stop.wait(self.poll_interval)
 
-    def poll_once(self) -> Dict[str, int]:
+    def poll_once(self) -> dict[str, int]:
         """Returns ``{project_path: new_messages_processed}`` for telemetry."""
-        out: Dict[str, int] = {}
+        out: dict[str, int] = {}
         if not self.client_root.is_dir():
             return out
         storage = self.storage_factory()

@@ -5,7 +5,7 @@ so the CLI (``skein briefing``) and any non-MCP consumer can hit it directly.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query
 
@@ -18,14 +18,14 @@ from ..storage import Storage
 router = APIRouter(prefix="/v1/briefing", tags=["briefing"])
 
 
-@router.get("", response_model=Dict[str, Any])
+@router.get("", response_model=dict[str, Any])
 def get_briefing(
     scope: Optional[str] = Query(
         None, description="Scope handle, e.g. 'project:myapp'. Omit to auto-detect."
     ),
     auth: AuthContext = RequireAuth,
     storage: Storage = Depends(get_storage),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return the project's current state in one round trip.
 
     See :func:`skein.mcp.build_briefing` for the response shape.

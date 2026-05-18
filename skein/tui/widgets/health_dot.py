@@ -31,12 +31,12 @@ class HealthHeader(Static):
     """
 
     def render(self) -> Text:
-        dot_color = "#7ec27e" if self.healthy else "#d97757"
+        dot_color = "#7ec27e" if self.healthy else "#c75450"
         status = "healthy" if self.healthy else "down"
         text = Text()
         text.append("Skein", style="bold #d97757")
         text.append("  ·  ", style="dim")
-        text.append(self.scope, style="cyan")
+        text.append(self.scope, style="bold")
         text.append("  ·  ", style="dim")
         text.append("◉", style=f"bold {dot_color}")
         text.append(f" daemon: {status}", style="bold")

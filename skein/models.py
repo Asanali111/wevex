@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -37,7 +37,7 @@ FRAGMENT_TYPES = frozenset({
 })
 
 # Default TTL by fragment type (seconds).  None = permanent.
-FRAGMENT_DEFAULT_TTL: Dict[str, Optional[int]] = {
+FRAGMENT_DEFAULT_TTL: dict[str, Optional[int]] = {
     "preference":   90 * 86400,
     "fact":         30 * 86400,
     "decision":     30 * 86400,
@@ -57,7 +57,7 @@ class IdentityCreate(BaseModel):
     handle: str = Field(..., description="Unique namespaced handle, e.g. 'user:ameliomar'")
     type: str = Field(..., description=f"One of {sorted(IDENTITY_TYPES)}")
     name: str
-    config: Dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("type")
     @classmethod
@@ -129,10 +129,10 @@ class CommitCreate(BaseModel):
     scope_id: str
     message: str
     parent_commit_id: Optional[str] = None
-    fragments_added: List[str] = Field(default_factory=list)
-    fragments_modified: List[str] = Field(default_factory=list)
-    fragments_removed: List[str] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    fragments_added: list[str] = Field(default_factory=list)
+    fragments_modified: list[str] = Field(default_factory=list)
+    fragments_removed: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Commit(CommitCreate):
@@ -153,15 +153,15 @@ class FragmentCreate(BaseModel):
     owner_id: str
     confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
     ttl_seconds: Optional[int] = Field(None, description="Override default TTL. 0 = permanent.")
-    tags: List[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
     territory: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     # Provenance (iter 14.0). All optional — explicit MCP calls fill these
     # automatically; manual REST calls may leave them blank.
     created_by_tool: Optional[str] = None
     created_in_session_id: Optional[str] = None
     created_against_commit: Optional[str] = None
-    files_open_at_creation: List[str] = Field(default_factory=list)
+    files_open_at_creation: list[str] = Field(default_factory=list)
     supersedes_fragment_id: Optional[str] = None
     extraction_method: str = Field("explicit", description="explicit | code-scan | transcript-claude | …")
     extraction_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
@@ -190,11 +190,11 @@ class FragmentUpdate(BaseModel):
     """All fields optional — PATCH semantics."""
     content: Optional[str] = Field(None, min_length=1)
     confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
-    tags: Optional[List[str]] = None
+    tags: Optional[list[str]] = None
     territory: Optional[str] = None
     is_stale: Optional[bool] = None
     stale_reason: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: Optional[dict[str, Any]] = None
     # For OCC: caller must send the version they last read.
     expected_version: int = Field(..., description="Optimistic-concurrency version from last read")
 
@@ -208,6 +208,10 @@ class Fragment(FragmentCreate):
     stale_reason: Optional[str] = None
     source_commit_id: Optional[str] = None
     superseded_by_fragment_id: Optional[str] = None  # mirror of the FK in DB
+    # Iter 25 (Q-05): deterministic "is this worth recalling?" score in
+    # [0.05, 1.0]. Set at create_fragment from provenance + type + content;
+    # multiplied into the final RRF score in retrieval.recall.
+    value: float = 0.5
     created_at: str = Field(default_factory=_now_iso)
     updated_at: str = Field(default_factory=_now_iso)
 
@@ -224,7 +228,7 @@ class LeaseCreate(BaseModel):
     owner_id: str
     ttl_seconds: int = Field(300, description="How long to hold the lease (seconds). Default 5 min.")
     reason: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Lease(LeaseCreate):
@@ -253,7 +257,7 @@ class ChunkCreate(BaseModel):
     language: Optional[str] = None
     chunk_type: str = "window"
     symbol_name: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("chunk_type")
     @classmethod
@@ -274,7 +278,7 @@ class Chunk(ChunkCreate):
 class ChunkSearchRequest(BaseModel):
     query: str = Field(..., min_length=1)
     scope: str
-    languages: Optional[List[str]] = None
+    languages: Optional[list[str]] = None
     source_root: Optional[str] = None
     limit: int = Field(10, ge=1, le=50)
 
@@ -284,10 +288,13 @@ class ChunkSearchResult(BaseModel):
     score: float
     rank: int
     matched_by: str
+    cosine: Optional[float] = None
+    bm25: Optional[float] = None
+    quality: str = "none"
 
 
 class ChunkSearchResponse(BaseModel):
-    results: List[ChunkSearchResult]
+    results: list[ChunkSearchResult]
     query: str
     scope: str
     total: int
@@ -297,8 +304,8 @@ class ChunkStats(BaseModel):
     scope: str
     total_chunks: int
     total_files: int
-    by_language: Dict[str, int]
-    by_root: Dict[str, int]
+    by_language: dict[str, int]
+    by_root: dict[str, int]
 
 
 # ---------------------------------------------------------------------------
@@ -308,9 +315,9 @@ class ChunkStats(BaseModel):
 class RecallRequest(BaseModel):
     query: str = Field(..., min_length=1)
     scope: str
-    types: Optional[List[str]] = None
+    types: Optional[list[str]] = None
     territory: Optional[str] = None
-    tags: Optional[List[str]] = None
+    tags: Optional[list[str]] = None
     limit: int = Field(10, ge=1, le=50)
     include_stale: bool = False
 
@@ -324,15 +331,65 @@ class RecallRequest(BaseModel):
         return v
 
 
+RECALL_QUALITY_LEVELS = ("high", "medium", "low", "none")
+
+# Cosine thresholds calibrated for normalized 384-dim sentence embeddings
+# (BAAI/bge-small-en-v1.5, the iter-23 default). Lower bounds for each bucket.
+# Hand-set so that "high" requires real paraphrase agreement, "none" is the
+# honest no-knowledge signal that the AGENTS.md guidance was always meant to
+# trigger (the old RRF-score threshold could not — RRF caps at ~0.033).
+RECALL_QUALITY_THRESHOLDS = {
+    "high":   0.65,
+    "medium": 0.50,
+    "low":    0.35,
+}
+
+
+def classify_recall_quality(
+    *,
+    cosine: Optional[float],
+    matched_by: str,
+    rank: int,
+) -> str:
+    """Map a result's raw signals to a human-readable quality bucket.
+
+    Cosine is authoritative when available — a high vector similarity means
+    the query and fragment are semantically close, which is what callers care
+    about. Pure-keyword hits (no embedding overlap) earn at most "low" because
+    BM25 by itself often spuriously matches stopwords or boilerplate.
+    """
+    if cosine is not None:
+        if cosine >= RECALL_QUALITY_THRESHOLDS["high"]:
+            return "high"
+        if cosine >= RECALL_QUALITY_THRESHOLDS["medium"]:
+            return "medium"
+        if cosine >= RECALL_QUALITY_THRESHOLDS["low"]:
+            return "low"
+        return "none"
+    # Keyword-only fallback: a top-3 BM25 hit is plausibly relevant, but the
+    # caller should know there's no semantic signal backing it.
+    if matched_by == "keyword" and rank <= 3:
+        return "low"
+    return "none"
+
+
 class RecallResult(BaseModel):
     fragment: Fragment
     score: float
     rank: int
     matched_by: str  # "keyword", "vector", "hybrid"
+    # iter 24: expose raw signals so callers don't have to interpret the
+    # opaque RRF score. ``cosine`` is the underlying vector similarity in
+    # [-1, 1] when a vector hit contributed; ``bm25`` is the (negated) BM25
+    # relevance when a keyword hit contributed. ``quality`` is the
+    # human-readable bucket — prefer it over ``score`` for routing decisions.
+    cosine: Optional[float] = None
+    bm25: Optional[float] = None
+    quality: str = "none"
 
 
 class RecallResponse(BaseModel):
-    results: List[RecallResult]
+    results: list[RecallResult]
     query: str
     scope: str
     total: int

@@ -1,7 +1,7 @@
 """Help modal — shows chord shortcuts grouped by screen."""
 from __future__ import annotations
 
-from typing import ClassVar, List
+from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -10,24 +10,24 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 _HELP_BODY = """[bold]Global[/bold]
-  [bold cyan]q[/bold cyan]       quit
-  [bold cyan]?[/bold cyan]       this help
-  [bold cyan]r[/bold cyan]       refresh the active tab
-  [bold cyan]1-5[/bold cyan]     jump to tab (briefing · fragments · inbox · events · clients)
-  [bold cyan]/[/bold cyan]       focus the search input (Fragments only)
+  [bold #d97757]q[/bold #d97757]       quit
+  [bold #d97757]?[/bold #d97757]       this help
+  [bold #d97757]r[/bold #d97757]       refresh the active tab
+  [bold #d97757]1-5[/bold #d97757]     jump to tab (briefing · fragments · inbox · events · clients)
+  [bold #d97757]/[/bold #d97757]       focus the search input (Fragments only)
 
 [bold]Fragments[/bold]
-  Type, then [bold cyan]Enter[/bold cyan]    run a recall
-  [bold cyan]Enter[/bold cyan]               open the highlighted hit
-  [bold cyan]escape[/bold cyan]              close detail popup
+  Type, then [bold #d97757]Enter[/bold #d97757]    run a recall
+  [bold #d97757]Enter[/bold #d97757]               open the highlighted hit
+  [bold #d97757]escape[/bold #d97757]              close detail popup
 
 [bold]Inbox[/bold]
-  [bold cyan]a[/bold cyan]       approve highlighted candidate
-  [bold cyan]x[/bold cyan]       reject highlighted candidate
+  [bold #d97757]a[/bold #d97757]       approve highlighted candidate
+  [bold #d97757]x[/bold #d97757]       reject highlighted candidate
 
 [bold]Events[/bold]
-  [bold cyan]p[/bold cyan]       pause / resume polling
-  [bold cyan]c[/bold cyan]       clear the visible buffer
+  [bold #d97757]p[/bold #d97757]       pause / resume polling
+  [bold #d97757]c[/bold #d97757]       clear the visible buffer
 """
 
 _FOOTER = (
@@ -38,7 +38,7 @@ _FOOTER = (
 class HelpModal(ModalScreen):
     """Floating shortcut reference; dismissed with escape, ?, or q."""
 
-    BINDINGS: ClassVar[List[Binding]] = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "dismiss", "close"),
         Binding("?", "dismiss", "close"),
         Binding("q", "dismiss", "close"),

@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -124,7 +124,7 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
 # Method dispatcher
 # ---------------------------------------------------------------------------
 
-async def _handle_one(msg: Dict[str, Any], request: Request) -> Optional[Dict]:
+async def _handle_one(msg: dict[str, Any], request: Request) -> Optional[dict]:
     req_id = msg.get("id")
     method = msg.get("method", "")
     params = msg.get("params") or {}
@@ -148,7 +148,7 @@ async def _handle_one(msg: Dict[str, Any], request: Request) -> Optional[Dict]:
         return _error_response(req_id, -32603, "Internal error", {"detail": str(e)})
 
 
-async def _dispatch(method: str, params: Dict[str, Any], request: Request) -> Any:
+async def _dispatch(method: str, params: dict[str, Any], request: Request) -> Any:
     from .dependencies import get_provider, get_storage
 
     storage = get_storage()
@@ -229,7 +229,7 @@ def _normalize_client_name(raw: str) -> str:
     return result or "unknown"
 
 
-def _remember_initiating_client(params: Dict[str, Any], request: Request, storage: Any) -> None:
+def _remember_initiating_client(params: dict[str, Any], request: Request, storage: Any) -> None:
     """Record the (token_prefix, client_name) pairing for this connection.
 
     Reads ``params.clientInfo.name`` per MCP spec; falls back to ``"unknown"``
@@ -265,7 +265,7 @@ def _client_name_for_request(request: Request, storage: Any) -> str:
         return "unknown"
 
 
-def _handle_initialize(params: Dict) -> Dict:
+def _handle_initialize(params: dict) -> dict:
     return {
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "serverInfo": {"name": "skein", "version": "0.1.0"},
@@ -319,9 +319,11 @@ _TOOLS = [
             "Use BEFORE reading source files when you need project history, prior "
             "decisions, or non-obvious 'why' / 'how' context. "
             "Returns top-K in <100ms, ~30 tokens per fragment — one `recall` "
-            "typically replaces 5+ `read_file` calls. If top score < 0.1, Skein "
-            "lacks high-signal content for that query and will tell you to fall "
-            "back to source. Scope auto-detected from cwd."
+            "typically replaces 5+ `read_file` calls. Each result carries a "
+            "`quality` bucket (high/medium/low/none) derived from the underlying "
+            "cosine similarity; if the top result is `quality=none`, Skein has "
+            "no high-signal context for that query and you should fall back to "
+            "source. Scope auto-detected from cwd."
         ),
         "inputSchema": {
             "type": "object",
@@ -512,10 +514,75 @@ _TOOLS = [
             "required": ["query"],
         },
     },
+    # ADR-002 / iter 26 — agent-facing controls for the fragment-value
+    # system (Q-05). The user never types these; the agent invokes them
+    # from natural language like "remember this is critical" or "this
+    # decision turned out wrong, ignore it." No CLI surface.
+    {
+        "name": "boost",
+        "description": (
+            "Pin a fragment to a high recall-time value. Use when the user "
+            "says \"this is important\" / \"always remember this\" / \"keep "
+            "this in mind\" about a specific fragment. Survives the daemon's "
+            "decay loop so the boost sticks across sessions. Takes a "
+            "fragment id (full or 8-char prefix). Returns the new value. ~5ms."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fragment_id": {"type": "string", "description": "Fragment id or 8-char prefix."},
+                "value": {
+                    "type": "number",
+                    "description": "Target value in [0.05, 1.0]. Default 1.0.",
+                    "default": 1.0,
+                },
+            },
+            "required": ["fragment_id"],
+        },
+    },
+    {
+        "name": "bury",
+        "description": (
+            "Drop a fragment's recall-time value to the floor. Use when the "
+            "user says \"this is wrong\" / \"forget this\" / \"ignore this "
+            "fragment.\" Doesn't delete the fragment — it stays in the audit "
+            "log — but it's effectively hidden from default recall. Takes a "
+            "fragment id (full or 8-char prefix). ~5ms."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fragment_id": {"type": "string", "description": "Fragment id or 8-char prefix."},
+            },
+            "required": ["fragment_id"],
+        },
+    },
+    {
+        "name": "archaeology",
+        "description": (
+            "Reconstruct the provenance of a decision: who created the "
+            "fragment, in which session, against which commit, what it "
+            "superseded, what superseded it. Use when answering \"why did "
+            "we decide X?\" — Skein has the full origin story even if the "
+            "commit message doesn't. Returns a structured trace. ~50ms."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Fragment id, 8-char prefix, or natural-language search.",
+                },
+                "scope": {"type": "string", "description": "Scope handle. Omit to auto-detect."},
+                "limit": {"type": "integer", "default": 5, "description": "Max traces (1–20)"},
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
-_GIT_HEAD_CACHE: Dict[str, tuple] = {}  # cwd → (commit_hash, expires_at)
+_GIT_HEAD_CACHE: dict[str, tuple] = {}  # cwd → (commit_hash, expires_at)
 
 
 def _resolve_git_head() -> Optional[str]:
@@ -571,7 +638,7 @@ _BRIEFING_TYPES = ("decision", "fact", "observation", "preference",
                    "state", "requirement", "procedure", "conversation")
 
 
-def build_briefing(storage: Any, scope_handle: str) -> Dict[str, Any]:
+def build_briefing(storage: Any, scope_handle: str) -> dict[str, Any]:
     """Pure builder for the project-briefing payload.
 
     Kept transport-agnostic so the MCP handler, REST router, and tests can all
@@ -588,8 +655,8 @@ def build_briefing(storage: Any, scope_handle: str) -> Dict[str, Any]:
         # Permissive: an LLM may call briefing on a brand-new project before
         # any fragments exist. Return zeros rather than 404 — the MCP tool
         # should be safe to call from any cwd.
-        type_counts: Dict[str, int] = {}
-        recent_decisions: List[Dict[str, Any]] = []
+        type_counts: dict[str, int] = {}
+        recent_decisions: list[dict[str, Any]] = []
         fragment_total = 0
     else:
         type_counts = storage.count_fragments_by_type(scope.id)
@@ -656,11 +723,11 @@ def build_briefing(storage: Any, scope_handle: str) -> Dict[str, Any]:
 
 async def _call_tool(
     name: str,
-    args: Dict[str, Any],
+    args: dict[str, Any],
     storage: Any,
     provider: Any,
     request: Request,
-) -> Dict:
+) -> dict:
     from .auth import token_prefix
     from .config import get_config
     from .models import (
@@ -708,6 +775,41 @@ async def _call_tool(
             name=scope_handle.split(":", 1)[-1], owner_id=owner_id,
         ))
 
+    def _resolve_fragment_id(storage_, prefix: str) -> Optional[str]:
+        """Accept a full UUID or an 8+ char prefix and return the full id.
+
+        Used by boost/bury/archaeology so the agent can paste the short id
+        the recall output already shows. Returns None on miss / ambiguous.
+        """
+        if not prefix:
+            return None
+        # Exact id?
+        if len(prefix) == 36 and "-" in prefix:
+            row = storage_._conn.execute(
+                "SELECT id FROM fragments WHERE id = ?", (prefix,),
+            ).fetchone()
+            return row["id"] if row else None
+        rows = storage_._conn.execute(
+            "SELECT id FROM fragments WHERE id LIKE ? LIMIT 2",
+            (prefix + "%",),
+        ).fetchall()
+        if len(rows) != 1:
+            return None
+        return rows[0]["id"]
+
+    def _resolve_scope_from_cwd_or_default() -> str:
+        """Pick a sensible default scope when the caller didn't pass one.
+
+        Mirrors what `recall` / `remember` do today via _project_scope —
+        keeps archaeology consistent with the rest of the surface.
+        """
+        try:
+            from .scope_resolver import resolve_scope
+            from .config import get_config
+            return resolve_scope(None, config_default=get_config().default_scope)[0]
+        except Exception:
+            return "project:default"
+
     # ---- project_briefing ----
     if name == "project_briefing":
         briefing = build_briefing(storage, args["scope"])
@@ -727,14 +829,26 @@ async def _call_tool(
         log_event("recall", scope=args["scope"], query=args["query"][:120], hits=response.total)
         if not response.results:
             return _tool_text("No relevant context found.")
-        lines = [f"Found {response.total} fragments for query: {response.query!r}\n"]
+        # iter 24: lead with the quality bucket — it's the only signal callers
+        # can route on without knowing what RRF/BM25/cosine look like.
+        top_quality = response.results[0].quality
+        header = f"Found {response.total} fragments for query: {response.query!r}"
+        if top_quality == "none":
+            header += (
+                "\n[top match is low-signal — Skein lacks high-quality context "
+                "for this query; fall back to source.]"
+            )
+        elif top_quality == "low":
+            header += "\n[top match is low quality — verify before relying.]"
+        lines = [header + "\n"]
         for r in response.results:
             f = r.fragment
             territory_note = f" [{f.territory}]" if f.territory else ""
             tags_note = f" #{' #'.join(f.tags)}" if f.tags else ""
+            cos_note = f" cos={r.cosine:.2f}" if r.cosine is not None else ""
             lines.append(
                 f"[{r.rank}] {f.type.upper()}{territory_note}{tags_note} "
-                f"(score={r.score:.3f}, id={f.id[:8]}…)\n"
+                f"(quality={r.quality}{cos_note}, id={f.id[:8]}…)\n"
                 f"  {f.content}\n"
             )
         return _tool_text("\n".join(lines))
@@ -990,12 +1104,125 @@ async def _call_tool(
             c = r.chunk
             sym = f" {c.symbol_name}" if c.symbol_name else ""
             lang = f" ({c.language})" if c.language else ""
+            cos_note = f" cos={r.cosine:.2f}" if r.cosine is not None else ""
             lines.append(
                 f"[{r.rank}] {c.source_path}:{c.line_start}-{c.line_end}{lang}{sym}  "
-                f"score={r.score:.3f}\n"
+                f"quality={r.quality}{cos_note}\n"
                 f"```{c.language or ''}\n{c.content}\n```\n"
             )
         return _tool_text("\n".join(lines))
+
+    # ---- boost (ADR-002 / iter 26) ----
+    if name == "boost":
+        from .events import log_event
+        from .models import FragmentUpdate
+        frag_id_prefix = args["fragment_id"]
+        target_value = float(args.get("value", 1.0))
+        if not (0.05 <= target_value <= 1.0):
+            return _tool_text(
+                f"Error: value must be in [0.05, 1.0]; got {target_value}."
+            )
+        full_id = _resolve_fragment_id(storage, frag_id_prefix)
+        if full_id is None:
+            return _tool_text(
+                f"No fragment matching prefix {frag_id_prefix!r}."
+            )
+        # Direct column write — value isn't part of the FragmentUpdate
+        # OCC contract (it's a daemon-managed signal), so we go around the
+        # ORM. Atomic single-statement UPDATE.
+        n = storage._conn.execute(
+            "UPDATE fragments SET value = ?, updated_at = datetime('now') WHERE id = ?",
+            (target_value, full_id),
+        ).rowcount
+        storage._conn.commit()
+        if n == 0:
+            return _tool_text(f"Fragment {full_id[:8]}… not found.")
+        log_event("boost", scope=None, fragment_id=full_id, value=target_value)
+        return _tool_text(
+            f"Boosted {full_id[:8]}… to value={target_value:.2f}. "
+            f"Will outrank lower-value fragments on the same query."
+        )
+
+    # ---- bury (ADR-002 / iter 26) ----
+    if name == "bury":
+        from .events import log_event
+        frag_id_prefix = args["fragment_id"]
+        full_id = _resolve_fragment_id(storage, frag_id_prefix)
+        if full_id is None:
+            return _tool_text(
+                f"No fragment matching prefix {frag_id_prefix!r}."
+            )
+        n = storage._conn.execute(
+            "UPDATE fragments SET value = 0.05, updated_at = datetime('now') WHERE id = ?",
+            (full_id,),
+        ).rowcount
+        storage._conn.commit()
+        if n == 0:
+            return _tool_text(f"Fragment {full_id[:8]}… not found.")
+        log_event("bury", scope=None, fragment_id=full_id)
+        return _tool_text(
+            f"Buried {full_id[:8]}… to value=0.05. "
+            f"Hidden from default recall; still in the audit log."
+        )
+
+    # ---- archaeology (ADR-002 / iter 26) ----
+    if name == "archaeology":
+        query = args["query"]
+        scope_handle = args.get("scope") or _resolve_scope_from_cwd_or_default()
+        limit = int(args.get("limit", 5))
+        # Three resolution paths in priority order: full id, 8-char prefix,
+        # natural-language search. First two are cheap exact lookups; the
+        # last falls through to recall() so the agent gets the full reading.
+        traces: list[str] = []
+        candidates: list = []
+        # Try exact id
+        full_id = _resolve_fragment_id(storage, query)
+        if full_id is not None:
+            frag = storage.get_fragment(full_id)
+            if frag is not None:
+                candidates = [frag]
+        if not candidates:
+            # Natural-language recall — agent will get the top-K traces
+            from .models import RecallRequest
+            from .retrieval import recall as do_recall
+            req = RecallRequest(query=query, scope=scope_handle, limit=limit)
+            resp = do_recall(req, storage, provider)
+            candidates = [r.fragment for r in resp.results[:limit]]
+        if not candidates:
+            return _tool_text(
+                f"No fragments found for archaeology query {query!r}."
+            )
+        for frag in candidates[:limit]:
+            chain: list[str] = [
+                f"Fragment {frag.id[:8]}… [{frag.type}]",
+                f"  Content: {frag.content[:160]}"
+                + ("…" if len(frag.content) > 160 else ""),
+                f"  Created: {frag.created_at} by {frag.created_by_tool or 'unknown'}",
+            ]
+            if frag.created_in_session_id:
+                chain.append(f"  Session: {frag.created_in_session_id}")
+            if frag.created_against_commit:
+                chain.append(f"  Commit: {frag.created_against_commit}")
+            if frag.supersedes_fragment_id:
+                old = storage.get_fragment(frag.supersedes_fragment_id)
+                if old:
+                    chain.append(
+                        f"  Supersedes {old.id[:8]}…: "
+                        f"{old.content[:80]}"
+                    )
+            if frag.superseded_by_fragment_id:
+                new = storage.get_fragment(frag.superseded_by_fragment_id)
+                if new:
+                    chain.append(
+                        f"  Superseded by {new.id[:8]}…: "
+                        f"{new.content[:80]}"
+                    )
+            chain.append(f"  Value: {frag.value:.2f}")
+            traces.append("\n".join(chain))
+        return _tool_text(
+            f"Archaeology for {query!r} ({len(traces)} traces):\n\n"
+            + "\n\n".join(traces)
+        )
 
     # ---- query_leases ----
     if name == "query_leases":
@@ -1054,7 +1281,7 @@ _RESOURCE_TEMPLATES = [
 ]
 
 
-async def _read_resource(uri: str, storage: Any, request: Request) -> Dict:
+async def _read_resource(uri: str, storage: Any, request: Request) -> dict:
     from .agents_md import render_agents_md
     from .config import get_config
 
@@ -1163,7 +1390,7 @@ context. Use it eagerly.
 """
 
 
-def _build_recall_first_prompt(scope: str) -> Dict:
+def _build_recall_first_prompt(scope: str) -> dict:
     text = _RECALL_FIRST_TEXT
     if scope:
         text = (
@@ -1185,7 +1412,7 @@ def _build_recall_first_prompt(scope: str) -> Dict:
     }
 
 
-def _get_prompt(name: str, args: Dict, storage: Any) -> Dict:
+def _get_prompt(name: str, args: dict, storage: Any) -> dict:
     from .agents_md import render_agents_md
     from .config import get_config
     from .dependencies import get_provider as get_global_provider
@@ -1247,13 +1474,13 @@ def _get_prompt(name: str, args: Dict, storage: Any) -> Dict:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _tool_text(text: str) -> Dict:
+def _tool_text(text: str) -> dict:
     return {"content": [{"type": "text", "text": text}]}
 
 
 def _error_response(req_id: Any, code: int, message: str,
-                    data: Optional[Any] = None) -> Dict:
-    err: Dict[str, Any] = {"code": code, "message": message}
+                    data: Optional[Any] = None) -> dict:
+    err: dict[str, Any] = {"code": code, "message": message}
     if data is not None:
         err["data"] = data
     return {"jsonrpc": "2.0", "id": req_id, "error": err}

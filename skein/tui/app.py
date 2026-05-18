@@ -11,7 +11,7 @@ daemon. In production we build the real ``HttpDaemonClient`` from
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, ClassVar, List, Optional
+from typing import Callable, ClassVar, Optional
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -49,7 +49,7 @@ class SkeinApp(App):
     TITLE = "Skein"
     SUB_TITLE = "context bus"
 
-    BINDINGS: ClassVar[List[Binding]] = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("q", "quit", "quit", show=True),
         Binding("?", "help", "help", show=True),
         Binding("r", "refresh", "refresh", show=True),

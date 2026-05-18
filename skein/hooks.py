@@ -22,12 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 from .config import get_config
 from .embeddings import get_provider as get_embedding_provider
@@ -198,15 +195,15 @@ def session_start(stdin_text: str = "") -> int:
         return 0
 
 
-def _render_grouped(scope_handle: str, frags: List, *, header: str) -> str:
+def _render_grouped(scope_handle: str, frags: list, *, header: str) -> str:
     """Group fragments by type and render compact markdown.
 
     The output the AI actually sees on every prompt — keep it clean."""
-    by_type: Dict[str, List] = {}
+    by_type: dict[str, list] = {}
     for f in frags:
         by_type.setdefault(f.type, []).append(f)
 
-    lines: List[str] = [f"## {header} — `{scope_handle}`", ""]
+    lines: list[str] = [f"## {header} — `{scope_handle}`", ""]
     for ftype in SECTION_ORDER:
         bucket = by_type.get(ftype)
         if not bucket:
@@ -361,7 +358,7 @@ def stop(stdin_text: str = "") -> int:
                 tags=["auto-extracted"],
                 metadata={"source": "claude-code-stop-hook"},
             )
-            embedding_bytes: Optional[bytes] = None
+            embedding_bytes: bytes | None = None
             if provider:
                 try:
                     from .embeddings import vec_to_bytes
@@ -401,13 +398,13 @@ def post_tool_use(stdin_text: str = "") -> int:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _extract_decisions(text: str) -> List[str]:
+def _extract_decisions(text: str) -> list[str]:
     """Return sentences that look like decisions."""
     if not text:
         return []
     # Split into rough sentences
     sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text)
-    out: List[str] = []
+    out: list[str] = []
     seen = set()
     for s in sentences:
         s = s.strip()
@@ -426,7 +423,7 @@ def _ts(iso: str) -> float:
         return 0.0
 
 
-def _path_to_territory(file_path: str) -> Optional[str]:
+def _path_to_territory(file_path: str) -> str | None:
     """Map a file path to a territory (top two path components)."""
     parts = Path(file_path).parts
     if len(parts) >= 2:

@@ -29,10 +29,9 @@ import re
 import shutil
 import subprocess
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Optional
 
 from .scanner import ScannedFact
 
@@ -52,7 +51,7 @@ class GitCommit:
     timestamp: str          # ISO 8601
     subject: str
     body: str               # full message minus subject line
-    files_changed: List[str] = None  # type: ignore
+    files_changed: list[str] = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +66,7 @@ _CONV_COMMIT_RE = re.compile(
 )
 
 
-def parse_conventional(subject: str) -> Optional[Dict[str, str]]:
+def parse_conventional(subject: str) -> Optional[dict[str, str]]:
     """Return type/scope/subject if the message follows Conventional Commits."""
     m = _CONV_COMMIT_RE.match(subject.strip())
     if not m:
@@ -124,7 +123,7 @@ _GIT_FORMAT = _FIELD_SEP.join([
 
 
 def read_commits_since(repo: Path, since_sha: Optional[str] = None,
-                        limit: int = 200) -> List[GitCommit]:
+                        limit: int = 200) -> list[GitCommit]:
     """Return commits in chronological order (oldest first) up to ``limit``.
 
     If ``since_sha`` is given, return only commits after it (exclusive).
@@ -153,7 +152,7 @@ def read_commits_since(repo: Path, since_sha: Optional[str] = None,
         if since_sha:
             return read_commits_since(repo, None, limit)
         return []
-    commits: List[GitCommit] = []
+    commits: list[GitCommit] = []
     for record in out.stdout.split(_RECORD_SEP):
         record = record.strip("\n\r")
         if not record:
@@ -170,7 +169,7 @@ def read_commits_since(repo: Path, since_sha: Optional[str] = None,
     return commits
 
 
-def files_changed_in(repo: Path, sha: str) -> List[str]:
+def files_changed_in(repo: Path, sha: str) -> list[str]:
     """``git diff-tree --no-commit-id --name-only -r <sha>``."""
     try:
         out = subprocess.run(
@@ -193,9 +192,9 @@ def files_changed_in(repo: Path, sha: str) -> List[str]:
 _PR_REF_RE = re.compile(r"(?<![A-Za-z0-9])#(\d{1,6})\b")
 
 
-def extract_pr_refs(text: str) -> List[int]:
+def extract_pr_refs(text: str) -> list[int]:
     """Return unique PR numbers referenced in ``text`` (capped at 5)."""
-    seen: List[int] = []
+    seen: list[int] = []
     for m in _PR_REF_RE.finditer(text or ""):
         n = int(m.group(1))
         if n not in seen:
@@ -275,7 +274,7 @@ def commit_to_fact(commit: GitCommit, repo_path: Optional[Path] = None) -> Scann
     conv = parse_conventional(commit.subject)
     type_tag = conv["type"] if conv else "commit"
 
-    parts: List[str] = [commit.subject]
+    parts: list[str] = [commit.subject]
     if commit.body:
         parts.append("")
         # Truncate huge bodies so a runaway commit can't drop a 100 KB fragment
@@ -294,7 +293,7 @@ def commit_to_fact(commit: GitCommit, repo_path: Optional[Path] = None) -> Scann
     if repo_path is not None:
         refs = extract_pr_refs(f"{commit.subject}\n{commit.body}")
         if refs:
-            blocks: List[str] = []
+            blocks: list[str] = []
             total = 0
             cap = 1500
             truncated = False
@@ -411,7 +410,7 @@ class GitCommitWatcher:
         commits = read_commits_since(self.repo_path, since_sha=since, limit=200)
         if not commits:
             return 0
-        facts: List[ScannedFact] = []
+        facts: list[ScannedFact] = []
         for commit in commits:
             if is_noise_commit(commit):
                 continue
@@ -446,7 +445,7 @@ class GitCommitWatcher:
 # ---------------------------------------------------------------------------
 
 
-def discover_scoped_projects(client_root: Path = None) -> List[Path]:
+def discover_scoped_projects(client_root: Path = None) -> list[Path]:
     """Find every directory that has a Skein scope pin AND a .git folder.
 
     Mirrors ``transcript_watcher.MultiProjectTranscriptWatcher`` — we discover
@@ -455,7 +454,7 @@ def discover_scoped_projects(client_root: Path = None) -> List[Path]:
     """
     from .transcript_watcher import decode_claude_project_dir, default_claude_code_root
     root = client_root or default_claude_code_root()
-    found: List[Path] = []
+    found: list[Path] = []
     if not root.is_dir():
         return found
     for entry in sorted(root.iterdir()):
@@ -515,8 +514,8 @@ class MultiProjectGitWatcher:
                 logger.debug("git watcher poll failed", exc_info=True)
             self._stop.wait(self.poll_interval)
 
-    def poll_once(self) -> Dict[str, int]:
-        out: Dict[str, int] = {}
+    def poll_once(self) -> dict[str, int]:
+        out: dict[str, int] = {}
         storage = self.storage_factory()
         try:
             owner_id = self.get_owner_id(storage)

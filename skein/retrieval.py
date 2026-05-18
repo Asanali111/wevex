@@ -14,12 +14,13 @@ outperforms Condorcet and individual rank learning methods."
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 from .embeddings import EmbeddingProvider, vec_to_bytes
 from .models import (
     ChunkSearchRequest, ChunkSearchResponse, ChunkSearchResult,
-    Fragment, RecallRequest, RecallResponse, RecallResult,
+    RecallRequest, RecallResponse, RecallResult,
+    classify_recall_quality,
 )
 from .storage import Storage
 
@@ -64,7 +65,7 @@ def recall(
     types = list(req.types) if req.types else None
 
     # 3. BM25 keyword search
-    keyword_hits: List[Tuple[str, float]] = []
+    keyword_hits: list[tuple[str, float]] = []
     try:
         keyword_hits = storage.keyword_search(
             req.query, scope_ids,
@@ -76,7 +77,7 @@ def recall(
         logger.warning("Keyword search failed: %s", e)
 
     # 4. Vector search
-    vector_hits: List[Tuple[str, float]] = []
+    vector_hits: list[tuple[str, float]] = []
     if have_embeddings and query_vec_bytes:
         try:
             vector_hits = storage.vector_search(
@@ -89,7 +90,7 @@ def recall(
         except Exception as e:
             logger.warning("Vector search failed: %s", e)
 
-    # 5. RRF fusion
+    # 5. RRF fusion (preserves raw cosine/bm25 alongside the fused score)
     fused = _rrf_fuse(
         lists=[keyword_hits, vector_hits],
         list_names=["keyword", "vector"],
@@ -100,18 +101,38 @@ def recall(
     if req.territory or req.tags:
         fused = _post_filter(fused, storage, req.territory, req.tags)
 
-    # 7. Hydrate
-    top = fused[: req.limit]
-    frag_ids = [fid for fid, _, _ in top]
+    # 7. Hydrate. Iter 25 (Q-05): apply the per-fragment value multiplier
+    # AFTER fusion so noisy fragments fall to the bottom without being
+    # deleted from the index. Hydrating up to all fused candidates (bounded
+    # by 2 × candidate_n) is cheap because it's a single SQL IN-clause; the
+    # extra cost vs. hydrating top-K is one DB round trip on at most ~60
+    # rows. The re-sort happens here, then we slice req.limit.
+    frag_ids = [item[0] for item in fused]
     fragments_by_id = storage.get_fragments_by_ids(frag_ids)
 
-    results: List[RecallResult] = []
-    for rank, (fid, score, matched_by) in enumerate(top, start=1):
+    rescored: list[tuple[str, float, str, dict[str, float]]] = []
+    for fid, rrf_score, matched_by, raw in fused:
         frag = fragments_by_id.get(fid)
         if frag is None:
             continue
+        adjusted = rrf_score * float(frag.value)
+        rescored.append((fid, adjusted, matched_by, raw))
+    rescored.sort(key=lambda x: x[1], reverse=True)
+    top = rescored[: req.limit]
+
+    results: list[RecallResult] = []
+    for rank, (fid, score, matched_by, raw) in enumerate(top, start=1):
+        frag = fragments_by_id.get(fid)
+        if frag is None:
+            continue
+        cosine = raw.get("vector")
+        bm25_score = raw.get("keyword")
         results.append(RecallResult(
             fragment=frag, score=score, rank=rank, matched_by=matched_by,
+            cosine=cosine, bm25=bm25_score,
+            quality=classify_recall_quality(
+                cosine=cosine, matched_by=matched_by, rank=rank,
+            ),
         ))
 
     return RecallResponse(
@@ -127,28 +148,33 @@ def recall(
 # ---------------------------------------------------------------------------
 
 def _rrf_fuse(
-    lists: List[List[Tuple[str, float]]],
-    list_names: List[str],
+    lists: list[list[tuple[str, float]]],
+    list_names: list[str],
     k: int = 60,
-) -> List[Tuple[str, float, str]]:
+) -> list[tuple[str, float, str, dict[str, float]]]:
     """Fuse multiple ranked lists with RRF.
 
-    Returns list of (fragment_id, rrf_score, source_name) sorted desc by score.
-    source_name indicates which list(s) contributed (e.g. "hybrid").
+    Returns list of ``(id, rrf_score, source_name, raw_scores)`` sorted by
+    score descending. ``raw_scores`` is a ``{list_name: original_score}`` map
+    that lets callers surface the underlying signals (cosine, BM25) — the RRF
+    score itself is just an ordinal-rank fusion artifact and is opaque to
+    consumers without normalisation.
     """
-    rrf_scores: Dict[str, float] = {}
-    sources: Dict[str, List[str]] = {}
+    rrf_scores: dict[str, float] = {}
+    sources: dict[str, list[str]] = {}
+    raw_by_id: dict[str, dict[str, float]] = {}
 
     for ranked_list, name in zip(lists, list_names):
-        for rank_0, (fid, _raw_score) in enumerate(ranked_list):
+        for rank_0, (fid, raw_score) in enumerate(ranked_list):
             rrf_scores[fid] = rrf_scores.get(fid, 0.0) + 1.0 / (k + rank_0 + 1)
             sources.setdefault(fid, []).append(name)
+            raw_by_id.setdefault(fid, {})[name] = float(raw_score)
 
     fused = []
     for fid, score in rrf_scores.items():
         src_list = sources[fid]
         matched_by = "hybrid" if len(src_list) > 1 else src_list[0]
-        fused.append((fid, score, matched_by))
+        fused.append((fid, score, matched_by, raw_by_id[fid]))
 
     fused.sort(key=lambda x: x[1], reverse=True)
     return fused
@@ -185,7 +211,7 @@ def search_chunks(
         logger.warning("Chunk embedding failed, keyword-only: %s", e)
 
     # BM25
-    keyword_hits: List[Tuple[str, float]] = []
+    keyword_hits: list[tuple[str, float]] = []
     try:
         keyword_hits = storage.chunks_keyword_search(
             req.query, scope_ids,
@@ -196,7 +222,7 @@ def search_chunks(
         logger.warning("chunks keyword search failed: %s", e)
 
     # Vector
-    vector_hits: List[Tuple[str, float]] = []
+    vector_hits: list[tuple[str, float]] = []
     if have_emb:
         try:
             vector_hits = storage.chunks_vector_search(
@@ -213,16 +239,22 @@ def search_chunks(
         k=k,
     )
     top = fused[: req.limit]
-    chunk_ids = [cid for cid, _, _ in top]
+    chunk_ids = [item[0] for item in top]
     chunks_by_id = storage.get_chunks_by_ids(chunk_ids)
 
-    results: List[ChunkSearchResult] = []
-    for rank, (cid, score, matched_by) in enumerate(top, start=1):
+    results: list[ChunkSearchResult] = []
+    for rank, (cid, score, matched_by, raw) in enumerate(top, start=1):
         chunk = chunks_by_id.get(cid)
         if chunk is None:
             continue
+        cosine = raw.get("vector")
+        bm25_score = raw.get("keyword")
         results.append(ChunkSearchResult(
             chunk=chunk, score=score, rank=rank, matched_by=matched_by,
+            cosine=cosine, bm25=bm25_score,
+            quality=classify_recall_quality(
+                cosine=cosine, matched_by=matched_by, rank=rank,
+            ),
         ))
 
     return ChunkSearchResponse(
@@ -231,21 +263,21 @@ def search_chunks(
 
 
 def _post_filter(
-    fused: List[Tuple[str, float, str]],
+    fused: list[tuple[str, float, str, dict[str, float]]],
     storage: Storage,
     territory: Optional[str],
-    tags: Optional[List[str]],
-) -> List[Tuple[str, float, str]]:
+    tags: Optional[list[str]],
+) -> list[tuple[str, float, str, dict[str, float]]]:
     """Post-filter fused results by territory prefix and/or tags."""
     if not territory and not tags:
         return fused
 
-    frag_ids = [fid for fid, _, _ in fused]
+    frag_ids = [item[0] for item in fused]
     frags = storage.get_fragments_by_ids(frag_ids)
 
     filtered = []
     for item in fused:
-        fid, score, src = item
+        fid = item[0]
         frag = frags.get(fid)
         if frag is None:
             continue

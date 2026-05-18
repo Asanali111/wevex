@@ -1,7 +1,7 @@
 """REST router: /v1/fragments — CRUD + recall (hybrid search)."""
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -56,7 +56,6 @@ def create_fragment(
     frag = storage.create_fragment(data, commit_id=commit.id, embedding=embedding_bytes)
 
     # Back-fill commit's fragments_added
-    from ..models import CommitCreate as _CC
     storage._conn.execute(
         "UPDATE commits SET fragments_added = ? WHERE id = ?",
         (f'["{frag.id}"]', commit.id),
@@ -65,7 +64,7 @@ def create_fragment(
     return frag
 
 
-@router.get("", response_model=List[Fragment])
+@router.get("", response_model=list[Fragment])
 def list_fragments(
     scope: Optional[str] = Query(None, description="Scope handle or ID"),
     type: Optional[str] = Query(None, description="Filter by fragment type"),
@@ -76,7 +75,7 @@ def list_fragments(
     exclude_tool: Optional[str] = Query(None, description="Exclude fragments whose created_by_tool equals this value"),
     auth: AuthContext = RequireAuth,
     storage: Storage = Depends(get_storage),
-) -> List[Fragment]:
+) -> list[Fragment]:
     scope_id: Optional[str] = None
     if scope:
         scope_obj = storage.get_scope(scope)

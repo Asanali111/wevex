@@ -22,10 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 logger = logging.getLogger("skein.hooks_install")
 
@@ -35,9 +34,9 @@ _SKEIN_MARKER_KEY = "__skein_managed"
 
 @dataclass
 class InstallReport:
-    written: List[str] = field(default_factory=list)
-    skipped: List[str] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
+    written: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
     def ok(self, label: str, path: str) -> None:
         self.written.append(f"{label}: {path}")
@@ -152,6 +151,23 @@ def _install_claude_code_global(
         report.err("Claude Code (global)", str(e))
 
 
+def _quote_bin(skein_bin: str) -> str:
+    """Quote a binary path for embedding in a shell command string.
+
+    Claude Code's hook runner spawns each ``command`` via the OS shell
+    (bash/zsh on POSIX, cmd.exe on Windows). Both shells treat a
+    double-quoted path as a single token, so wrapping in ``"..."`` handles
+    the common case of binaries under ``C:\\Program Files\\...`` on Windows
+    or ``~/Library/Application Support/...`` on macOS. We don't try to
+    escape internal quote characters — binary paths don't have them.
+    """
+    if " " in skein_bin and not (
+        skein_bin.startswith('"') and skein_bin.endswith('"')
+    ):
+        return f'"{skein_bin}"'
+    return skein_bin
+
+
 def _merge_claude_skein_hooks(
     settings: dict, skein_bin: str, scope_handle: Optional[str],
 ) -> None:
@@ -159,15 +175,26 @@ def _merge_claude_skein_hooks(
 
     Format follows the Claude Code 'hooks' schema:
       { "hooks": { "<EventName>": [ {"matcher": "*", "hooks": [{"type":"command", "command":"..."}]} ] } }
+
+    Note on scope: earlier iterations prefixed the command with
+    ``SKEIN_SCOPE=<handle>`` (POSIX shell env-var syntax), but that is not
+    a valid construct in Windows ``cmd.exe`` and ``cmd.exe`` is what
+    Claude Code on Windows spawns hooks through. We rely entirely on the
+    ``.skein/scope`` pin file (written next to ``.claude/settings.json`` by
+    :func:`_install_claude_code`) for scope resolution. The hook subprocess
+    starts in Claude Code's cwd (== repo root) and walks up via
+    :func:`scope_resolver.find_scope_pin`, so the pin always wins. The
+    ``scope_handle`` argument is kept for backwards-compatible call
+    signatures but is no longer embedded in the command string.
     """
     hooks_root = settings.setdefault("hooks", {})
-    env_prefix = f"SKEIN_SCOPE={scope_handle} " if scope_handle else ""
+    bin_q = _quote_bin(skein_bin)
 
     events = {
-        "SessionStart":     f"{env_prefix}{skein_bin} hook session-start",
-        "UserPromptSubmit": f"{env_prefix}{skein_bin} hook user-prompt-submit",
-        "Stop":             f"{env_prefix}{skein_bin} hook stop",
-        "PostToolUse":      f"{env_prefix}{skein_bin} hook post-tool-use",
+        "SessionStart":     f"{bin_q} hook session-start",
+        "UserPromptSubmit": f"{bin_q} hook user-prompt-submit",
+        "Stop":             f"{bin_q} hook stop",
+        "PostToolUse":      f"{bin_q} hook post-tool-use",
     }
 
     for event_name, command in events.items():

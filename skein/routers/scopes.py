@@ -1,7 +1,6 @@
 """REST router: /v1/scopes"""
 from __future__ import annotations
 
-from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -30,13 +29,13 @@ def create_scope(
     return storage.create_scope(data)
 
 
-@router.get("", response_model=List[Scope])
+@router.get("", response_model=list[Scope])
 def list_scopes(
     limit: int = 50,
     offset: int = 0,
     auth: AuthContext = RequireAuth,
     storage: Storage = Depends(get_storage),
-) -> List[Scope]:
+) -> list[Scope]:
     return storage.list_scopes(limit=limit, offset=offset)
 
 
@@ -52,12 +51,12 @@ def get_scope(
     return scope
 
 
-@router.get("/{id_or_handle}/lineage", response_model=List[Scope])
+@router.get("/{id_or_handle}/lineage", response_model=list[Scope])
 def get_scope_lineage(
     id_or_handle: str,
     auth: AuthContext = RequireAuth,
     storage: Storage = Depends(get_storage),
-) -> List[Scope]:
+) -> list[Scope]:
     lineage = storage.get_scope_lineage(id_or_handle)
     if not lineage:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scope not found")

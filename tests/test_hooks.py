@@ -354,7 +354,11 @@ class TestHooksInstall:
         assert block.get("__skein_managed") is True
         cmd = block["hooks"][0]["command"]
         assert "skein hook session-start" in cmd
-        assert "SKEIN_SCOPE=project:test" in cmd
+        # Iter 27 Windows port: SKEIN_SCOPE prefix dropped (POSIX-only shell
+        # syntax, breaks on cmd.exe). Scope is resolved by the hook process
+        # via .skein/scope walk-up from Claude Code's cwd; that pin file is
+        # written by install_hooks() so the contract still holds.
+        assert "SKEIN_SCOPE=" not in cmd
 
     def test_install_writes_cursor_rule(self, tmp_path):
         install_hooks(tmp_path, "project:cursortest", skein_bin="skein")

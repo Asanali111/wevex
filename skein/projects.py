@@ -31,7 +31,9 @@ import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
+
+from . import paths as _skein_paths
 
 logger = logging.getLogger("skein.projects")
 
@@ -40,7 +42,9 @@ logger = logging.getLogger("skein.projects")
 # Paths
 # ---------------------------------------------------------------------------
 
-REGISTRY_PATH = Path.home() / ".config" / "skein" / "projects.json"
+# Moves to %APPDATA%\skein\projects.json on Windows; unchanged on
+# macOS / Linux. See skein/paths.py.
+REGISTRY_PATH = _skein_paths.projects_registry_path()
 
 _LOCK = threading.Lock()
 
@@ -85,7 +89,7 @@ def _load_raw() -> dict:
     if not REGISTRY_PATH.exists():
         return {"projects": []}
     try:
-        with open(REGISTRY_PATH) as f:
+        with open(REGISTRY_PATH, encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("projects.json unreadable, starting fresh: %s", e)
@@ -95,7 +99,7 @@ def _load_raw() -> dict:
 def _save_raw(data: dict) -> None:
     REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = REGISTRY_PATH.with_suffix(".json.tmp")
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=False)
         f.write("\n")
     tmp.replace(REGISTRY_PATH)
@@ -105,7 +109,7 @@ def _save_raw(data: dict) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def list_projects() -> List[ProjectEntry]:
+def list_projects() -> list[ProjectEntry]:
     """Return all registered projects, oldest first."""
     with _LOCK:
         data = _load_raw()

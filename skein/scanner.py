@@ -24,11 +24,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger("skein.scanner")
 
@@ -45,7 +44,7 @@ class ScannedFact:
     type: str = "fact"                  # fact | preference
     confidence: float = 1.0             # 0..1
     source_file: Optional[str] = None   # relative path inside project root
-    tags: List[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     territory: Optional[str] = None
     # Stable identifier for this *fact slot*. Two scans that emit the same
     # ``topic_key`` are about the same thing — if their content differs, the
@@ -60,7 +59,7 @@ class ScannedFact:
 # ---------------------------------------------------------------------------
 
 
-def scan_project(root: Path) -> List[ScannedFact]:
+def scan_project(root: Path) -> list[ScannedFact]:
     """Run every scanner against ``root`` and return the union of facts.
 
     Order doesn't matter — callers deduplicate. Empty list if the directory
@@ -69,7 +68,7 @@ def scan_project(root: Path) -> List[ScannedFact]:
     root = Path(root).resolve()
     if not root.is_dir():
         return []
-    facts: List[ScannedFact] = []
+    facts: list[ScannedFact] = []
     for scanner in _SCANNERS:
         try:
             facts.extend(scanner(root))
@@ -84,7 +83,7 @@ def scan_project(root: Path) -> List[ScannedFact]:
 # ---------------------------------------------------------------------------
 
 
-def _scan_package_json(root: Path) -> List[ScannedFact]:
+def _scan_package_json(root: Path) -> list[ScannedFact]:
     p = root / "package.json"
     if not p.is_file():
         return []
@@ -92,7 +91,7 @@ def _scan_package_json(root: Path) -> List[ScannedFact]:
         data = json.loads(p.read_text())
     except Exception:
         return []
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     # Project name → fact
     name = data.get("name")
     if name:
@@ -133,7 +132,7 @@ def _scan_package_json(root: Path) -> List[ScannedFact]:
     return out
 
 
-def _scan_pyproject_toml(root: Path) -> List[ScannedFact]:
+def _scan_pyproject_toml(root: Path) -> list[ScannedFact]:
     p = root / "pyproject.toml"
     if not p.is_file():
         return []
@@ -145,7 +144,7 @@ def _scan_pyproject_toml(root: Path) -> List[ScannedFact]:
         data = tomllib.loads(p.read_text())
     except Exception:
         return []
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     proj = data.get("project", {}) or {}
     name = proj.get("name") or data.get("tool", {}).get("poetry", {}).get("name")
     if name:
@@ -193,11 +192,11 @@ def _scan_pyproject_toml(root: Path) -> List[ScannedFact]:
     return out
 
 
-def _scan_requirements_txt(root: Path) -> List[ScannedFact]:
+def _scan_requirements_txt(root: Path) -> list[ScannedFact]:
     p = root / "requirements.txt"
     if not p.is_file():
         return []
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     for line in p.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or line.startswith("-"):
@@ -215,11 +214,11 @@ def _scan_requirements_txt(root: Path) -> List[ScannedFact]:
     return out[:60]
 
 
-def _scan_dockerfile(root: Path) -> List[ScannedFact]:
+def _scan_dockerfile(root: Path) -> list[ScannedFact]:
     p = root / "Dockerfile"
     if not p.is_file():
         return []
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     text = p.read_text()
     # Base image
     m = re.search(r"^\s*FROM\s+([^\s]+)", text, re.MULTILINE | re.IGNORECASE)
@@ -250,14 +249,14 @@ def _scan_dockerfile(root: Path) -> List[ScannedFact]:
     return out
 
 
-def _scan_compose(root: Path) -> List[ScannedFact]:
+def _scan_compose(root: Path) -> list[ScannedFact]:
     for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
         p = root / name
         if p.is_file():
             break
     else:
         return []
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     text = p.read_text()
     # Service-name extraction — looks like top-level `services:` block with
     # 2-space-indented keys. Conservative regex, won't catch all valid YAMLs.
@@ -274,12 +273,12 @@ def _scan_compose(root: Path) -> List[ScannedFact]:
     return out
 
 
-def _scan_gitignore(root: Path) -> List[ScannedFact]:
+def _scan_gitignore(root: Path) -> list[ScannedFact]:
     p = root / ".gitignore"
     if not p.is_file():
         return []
     text = p.read_text()
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     # Heuristic: presence of these patterns implies the stack
     indicators = {
         "__pycache__": "Python project (Python bytecode is gitignored).",
@@ -300,11 +299,11 @@ def _scan_gitignore(root: Path) -> List[ScannedFact]:
     return out
 
 
-def _scan_ci(root: Path) -> List[ScannedFact]:
+def _scan_ci(root: Path) -> list[ScannedFact]:
     wf_dir = root / ".github" / "workflows"
     if not wf_dir.is_dir():
         return []
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     workflow_files = list(wf_dir.glob("*.yml")) + list(wf_dir.glob("*.yaml"))
     if workflow_files:
         out.append(ScannedFact(
@@ -316,8 +315,8 @@ def _scan_ci(root: Path) -> List[ScannedFact]:
     return out
 
 
-def _scan_test_layout(root: Path) -> List[ScannedFact]:
-    out: List[ScannedFact] = []
+def _scan_test_layout(root: Path) -> list[ScannedFact]:
+    out: list[ScannedFact] = []
     for candidate in ("tests/", "test/", "__tests__/", "spec/"):
         d = root / candidate.rstrip("/")
         if d.is_dir():
@@ -332,11 +331,11 @@ def _scan_test_layout(root: Path) -> List[ScannedFact]:
     return out
 
 
-def _scan_readme(root: Path) -> List[ScannedFact]:
+def _scan_readme(root: Path) -> list[ScannedFact]:
     p = root / "README.md"
     if not p.is_file():
         return []
-    out: List[ScannedFact] = []
+    out: list[ScannedFact] = []
     text = p.read_text()
     # First H1 → project tagline
     m = re.search(r"^#\s+(.+?)$", text, re.MULTILINE)
@@ -389,7 +388,7 @@ def _filter_notable_deps(deps: dict) -> dict:
 # Scanner registry
 # ---------------------------------------------------------------------------
 
-_SCANNERS: List[Callable[[Path], List[ScannedFact]]] = [
+_SCANNERS: list[Callable[[Path], list[ScannedFact]]] = [
     _scan_package_json,
     _scan_pyproject_toml,
     _scan_requirements_txt,

@@ -1,17 +1,23 @@
 """Skein CLI — all user-facing commands.
 
-Commands:
-  init          First-time setup: generate token, create config, seed default scope.
-  serve         Start the daemon (FastAPI + MCP on 127.0.0.1:8765).
-  sync          Write MCP configs for all LLM clients + regenerate AGENTS.md.
-  remember      Store a context fragment.
-  recall        Search and print context fragments.
-  note          Record a decision (convenience alias for remember --type decision).
-  lease         Acquire an advisory lease on a file-glob pattern.
-  leases        List active leases.
-  agents-md     Print or write the rendered AGENTS.md for a scope.
-  status        Show daemon status and key stats.
-  doctor        Diagnose config issues across all sync targets.
+After ADR-002 (iter 26), the visible surface is ten commands. The bulk of
+what used to be top-level CLI is now either (a) daemon background work,
+(b) MCP tools the agent calls, or (c) sections folded into the diagnostic
+commands below. The deletion-candidate commands are still wired up but
+hidden=True so the next session can verify nothing relies on them before
+removing the code.
+
+Visible commands:
+  up         Start the daemon, register the cwd, connect detected clients.
+  down       Stop everything cleanly.
+  restart    Restart the daemon.
+  status     One-screen health: daemon, clients, fragment + chunk counts.
+  doctor     Deep diagnostic; --clean and --reingest for cleanup.
+  tail       Live event stream.
+  briefing   Project state. With --since, becomes the cross-tool diff feed.
+  tui        Interactive control panel.
+  config     View or set runtime configuration.
+  connect    Wire installed LLM tools through Skein (--remove to disconnect).
 """
 from __future__ import annotations
 
@@ -129,11 +135,17 @@ def main(ctx: click.Context) -> None:
 
     \b
     Quick start:
-        skein init            # first-time setup
-        skein serve           # start the daemon (keep running)
-        skein sync            # configure all LLM clients
-        skein remember "use async/await for all I/O" --type preference
-        skein recall "async patterns"
+        skein up              # start daemon, connect clients, watch this repo
+        skein status          # see what's wired up
+        skein doctor          # deep diagnostic
+        skein briefing        # what's the state of this project?
+        skein down            # stop everything
+
+    \b
+    Day-to-day, you don't need a CLI. The MCP tools (recall / remember /
+    note_decision / boost / bury / archaeology / supersede) live inside your
+    LLM — Claude Code, Cursor, Codex, etc. — and the daemon takes care of
+    sync, gc, and inbox approval automatically.
 
     Full docs: https://github.com/ameliomar/skein
     """
@@ -194,7 +206,7 @@ def up(
     from .agents_md import render_agents_md
     from .auth import generate_token
     from .config import SkeinConfig, _default_config_path, load_config
-    from .daemon import current_status, ensure_running
+    from .daemon import ensure_running
     from .embeddings import get_provider as _get_emb
     from .hooks_install import install_hooks
     from .ingest import ingest_directory
@@ -539,7 +551,6 @@ def up(
         from .scanner import scan_project
         from .passive import promote_scanned_facts
         from .config import get_config as _gc
-        from .dependencies import get_storage as _gs, get_provider as _gp
         # Re-open storage briefly for the scan since we just closed it above
         cfg2 = _gc()
         from .storage import Storage as _Storage
@@ -713,7 +724,7 @@ def restart() -> None:
         sys.exit(1)
 
 
-@main.group("daemon")
+@main.group("daemon", hidden=True)
 def daemon_grp() -> None:
     """Inspect or control the persistent daemon."""
 
@@ -769,7 +780,7 @@ def daemon_logs(err: bool, n: int) -> None:
 # watch — foreground watcher process (spawned by skein up; not for humans)
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("path", type=click.Path(exists=True, file_okay=False))
 @click.option("--scope", required=True, help="Scope handle to attribute chunks to.")
 @click.option("--source-root", default=None,
@@ -847,7 +858,7 @@ def watch(path: str, scope: str, source_root: Optional[str], polling: bool) -> N
 # projects — registry of active project roots the daemon watches
 # ---------------------------------------------------------------------------
 
-@main.group()
+@main.group(hidden=True)
 def projects() -> None:
     """List or manage active project roots (auto-watched for live re-ingest)."""
 
@@ -920,7 +931,7 @@ def projects_remove(root_or_scope: str) -> None:
 # init
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.option("--db-path", default=None, help="Path to the SQLite database file.")
 @click.option("--port", default=8765, type=int, show_default=True)
 @click.option("--host", default="127.0.0.1", show_default=True)
@@ -961,7 +972,8 @@ def init(
         return
 
     token = generate_token()
-    effective_db = db_path or str(Path.home() / ".config" / "skein" / "skein.db")
+    from . import paths as _skein_paths
+    effective_db = db_path or str(_skein_paths.default_db_path())
 
     # If the user didn't pass --embedding-provider, auto-pick the best
     # available: gemini > openai > bm25. Never auto-pick 'hash' — it's
@@ -1020,7 +1032,7 @@ def init(
 # serve
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.option("--host", default=None, help="Override host from config.")
 @click.option("--port", default=None, type=int, help="Override port from config.")
 @click.option("--reload", is_flag=True, default=False, help="Auto-reload on code changes (dev mode).")
@@ -1042,7 +1054,7 @@ def serve(
       Docs      http://127.0.0.1:8765/docs
     """
     import uvicorn
-    from .config import get_config, reset_config
+    from .config import get_config
 
     cfg = get_config()
     effective_host = host or cfg.host
@@ -1080,7 +1092,7 @@ def serve(
 # sync
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.option("--scope", default=None, help="Scope to render AGENTS.md from.")
 @click.option("--repo", default=None, type=click.Path(file_okay=False),
               help="Project root dir (default: cwd).")
@@ -1188,10 +1200,15 @@ def _render_clients_table(connected_ids: set) -> tuple:
               help="Connect every detected client without prompting.")
 @click.option("--no-sync", is_flag=True, default=False,
               help="Update the registry but don't write configs yet.")
+@click.option("--remove", "do_remove", is_flag=True, default=False,
+              help="Disconnect CLIENT_ID instead of connecting it. With "
+                   "--all, disconnects every currently-connected client. "
+                   "Replaces `skein disconnect` per ADR-002.")
 def connect(
     client_id: Optional[str],
     all_detected: bool,
     no_sync: bool,
+    do_remove: bool,
 ) -> None:
     """Pick which installed LLM tools should share context via Skein.
 
@@ -1200,7 +1217,18 @@ def connect(
       skein connect              interactive checklist of detected tools
       skein connect cursor       connect a single client by id
       skein connect --all        connect every detected client (CI-friendly)
+      skein connect cursor --remove  disconnect a single client
+      skein connect --all --remove   disconnect every connected client
     """
+    # --remove dispatches into the existing disconnect handler so the
+    # uninstall path stays consistent. disconnect() will be marked hidden
+    # in this iter and deleted in a follow-up after a week of dogfooding.
+    if do_remove:
+        ctx = click.Context(disconnect)
+        ctx.invoke(
+            disconnect, client_id=client_id, all_connected=all_detected,
+        )
+        return
     from . import clients as clients_mod
     from . import connections as conns
     from .config import get_config
@@ -1353,7 +1381,7 @@ def connect(
         console.print(f"  {ui.mark('skip')} [dim]{item}[/dim]")
 
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("client_id", required=False)
 @click.option("--all", "all_connected", is_flag=True, default=False,
               help="Disconnect every currently connected client.")
@@ -1411,7 +1439,7 @@ def disconnect(client_id: Optional[str], all_connected: bool) -> None:
     ui.blank()
 
 
-@main.command("clients")
+@main.command("clients", hidden=True)
 @click.option("--json", "output_json", is_flag=True, default=False,
               help="Emit machine-readable JSON.")
 def clients_cmd(output_json: bool) -> None:
@@ -1468,7 +1496,7 @@ def clients_cmd(output_json: bool) -> None:
 # remember
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("content")
 @click.option("--type", "frag_type", required=True,
               type=click.Choice([
@@ -1547,7 +1575,7 @@ def remember(
 # recall
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("query")
 @click.option("--scope", default=None, help="Scope handle (default from config).")
 @click.option("--type", "types", multiple=True,
@@ -1663,7 +1691,7 @@ def _parse_since(raw: str) -> str:
     )
 
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("since_arg")
 @click.option("--scope", default=None, help="Scope handle (default from config).")
 @click.option("--type", "types", multiple=True,
@@ -1774,7 +1802,7 @@ def since(
 # note (alias: remember --type decision)
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("content")
 @click.option("--scope", default=None)
 @click.option("--territory", "-t", default=None)
@@ -1844,7 +1872,7 @@ def note(
 # lease
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("glob")
 @click.option("--scope", default=None)
 @click.option("--ttl", default=300, show_default=True,
@@ -1907,7 +1935,7 @@ def lease(
 # leases
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.option("--scope", default=None)
 @click.option("--all", "show_all", is_flag=True, default=False,
               help="Show expired leases too.")
@@ -1965,7 +1993,7 @@ def leases(
 # agents-md
 # ---------------------------------------------------------------------------
 
-@main.command("agents-md")
+@main.command("agents-md", hidden=True)
 @click.option("--scope", default=None)
 @click.option("--write", "write_path", default=None, type=click.Path(),
               help="Write to this file instead of stdout.")
@@ -1998,7 +2026,11 @@ def agents_md_cmd(scope: Optional[str], write_path: Optional[str]) -> None:
 @main.command()
 @click.option("--json", "output_json", is_flag=True, default=False)
 def status(output_json: bool) -> None:
-    """Show daemon status and key stats."""
+    """One-screen health: daemon, watcher, clients, fragment + chunk counts.
+
+    Per ADR-002, this is the single \"is Skein on and wired up?\" surface —
+    it absorbs the old `daemon status` and `clients` commands.
+    """
     from . import ui
     with _client() as client:
         try:
@@ -2013,11 +2045,45 @@ def status(output_json: bool) -> None:
                 ui.hint("Run [bold]skein up[/bold] to start the daemon.")
             sys.exit(1)
 
+    cfg = _get_config()
+
+    # ADR-002: fold the `clients` table into status so the user sees in
+    # one screen which LLM tools are actually wired through Skein.
+    client_summary: list[dict] = []
+    try:
+        from . import clients as clients_mod
+        from . import connections as conns
+        connected_ids = set(conns.get_connected_ids())
+        for c in clients_mod.detect_all():
+            client_summary.append({
+                "id": c["id"],
+                "label": c.get("display_name") or c["id"],
+                "detected": bool(c["detected"]),
+                "connected": c["id"] in connected_ids,
+            })
+    except Exception:
+        # status must work even if the clients module errors — best-effort.
+        client_summary = []
+
+    # ADR-002: surface the inbox depth + recent auto-gc/auto-approve counts
+    # so a healthy daemon doing background work is visible at a glance.
+    inbox_count = 0
+    try:
+        from .storage import Storage
+        st = Storage(cfg.db_path)
+        try:
+            inbox_count = st.count_extraction_candidates(status="pending")
+        finally:
+            st.close()
+    except Exception:
+        pass
+
     if output_json:
+        data["clients"] = client_summary
+        data["inbox_pending"] = inbox_count
         print(json.dumps(data, indent=2))
         return
 
-    cfg = _get_config()
     db_path = str(data.get("db_path", "?")).replace(str(Path.home()), "~")
     ui.header("Skein is running", state="ok")
     ui.fields([
@@ -2030,8 +2096,24 @@ def status(output_json: bool) -> None:
         ("Fragments",  f"[bold]{data.get('fragment_count', 0)}[/bold]"),
         ("Scopes",     str(data.get('scope_count', 0))),
         ("Identities", str(data.get('identity_count', 0))),
+        ("Inbox",      f"{inbox_count} pending"),
     ], label_width=10)
     ui.blank()
+
+    if client_summary:
+        ui.bullet("[bold]Clients[/bold]")
+        for c in client_summary:
+            if c["connected"]:
+                marker = "[green]✓[/green]"
+                tag = "connected"
+            elif c["detected"]:
+                marker = "[yellow]·[/yellow]"
+                tag = "detected, not connected"
+            else:
+                marker = "[dim]·[/dim]"
+                tag = "[dim]not installed[/dim]"
+            console.print(f"    {marker}  {c['label']:18}  [dim]{tag}[/dim]")
+        ui.blank()
 
 
 # ---------------------------------------------------------------------------
@@ -2040,14 +2122,32 @@ def status(output_json: bool) -> None:
 
 @main.command()
 @click.option("--scope", default=None, help="Override the auto-detected scope.")
+@click.option("--since", "since_arg", default=None,
+              help="Show fragments created after a timestamp instead of the "
+                   "default dashboard. Accepts ISO datetime or relative "
+                   "(`1h`, `2d`, `2026-05-12`). Replaces `skein since`.")
 @click.option("--json", "output_json", is_flag=True, default=False,
               help="Emit the raw JSON payload (LLM-friendly).")
-def briefing(scope: Optional[str], output_json: bool) -> None:
+def briefing(scope: Optional[str], since_arg: Optional[str], output_json: bool) -> None:
     """Show the project's current state in one round trip.
 
     Mirrors the `project_briefing` MCP tool: fragment counts by type, recent
     decisions, daemon health, and a recommended next action.
+
+    With `--since <when>` (ADR-002), switches into the cross-tool "what
+    changed?" feed — list all fragments created after the given timestamp
+    so a new session can see what other agents wrote since the last one.
     """
+    # --since dispatches into the existing since-command logic so the rich
+    # display stays consistent. since() will be marked hidden in this iter
+    # and deleted in a follow-up after a week of dogfooding.
+    if since_arg is not None:
+        ctx = click.Context(since)
+        ctx.invoke(
+            since, since_arg=since_arg, scope=scope, types=(),
+            exclude_tool=None, limit=50, output_json=output_json,
+        )
+        return
     from . import ui
     scope_handle = _resolve_scope(scope)
     with _client() as client:
@@ -2120,7 +2220,7 @@ def briefing(scope: Optional[str], output_json: bool) -> None:
 # preview — show exactly what gets injected into agent prompts
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("query", required=False)
 @click.option("--scope", default=None, help="Override the auto-detected scope.")
 @click.option("--session-start", is_flag=True, default=False,
@@ -2258,7 +2358,7 @@ def _preview_user_prompt(storage, scope_obj, scope_handle: str,
 # gc — interactive cleanup of junk scopes and fragments
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.option("--yes", "-y", is_flag=True, default=False,
               help="Skip confirmation prompts (CI use).")
 @click.option("--dry-run", is_flag=True, default=False,
@@ -2404,7 +2504,7 @@ def gc(yes: bool, dry_run: bool) -> None:
 # events — recent activity stream (commits + recently-stored fragments)
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.option("--scope", default=None, help="Filter by scope.")
 @click.option("-n", "--limit", default=20, show_default=True, type=int)
 @click.option("--json", "output_json", is_flag=True, default=False)
@@ -2459,11 +2559,48 @@ def events(scope: Optional[str], limit: int, output_json: bool) -> None:
 # doctor
 # ---------------------------------------------------------------------------
 
+def _doctor_clean() -> None:
+    """ADR-002: replace `skein gc` invocation. Delegates to the existing
+    gc handler so the cleanup heuristics live in one place — when `gc`
+    is eventually deleted, only this helper moves with it.
+    """
+    ctx = click.Context(gc)
+    ctx.invoke(gc, yes=False, dry_run=False)
+
+
+def _doctor_reingest() -> None:
+    """ADR-002: replace `skein ingest .` invocation. Delegates to the
+    existing ingest handler with the conservative defaults a re-ingest
+    needs (no --reset, no --prune)."""
+    ctx = click.Context(ingest)
+    ctx.invoke(
+        ingest, path=".", scope=None, source_root=None,
+        chunk_lines=80, overlap_lines=10, include_exts=None,
+        extra_excludes=(), max_bytes=None,
+        prune=False, reset=False, dry_run=False, quiet=False,
+    )
+
+
 @main.command()
 @click.option("--perf", "show_perf", is_flag=True, default=False,
               help="Also measure recall/search latency and chunk-index stats.")
-def doctor(show_perf: bool) -> None:
-    """Diagnose config issues across all sync targets.
+@click.option("--clean", "do_clean", is_flag=True, default=False,
+              help="Interactive cleanup: list stale chunks + expired fragments, "
+                   "confirm before deleting. Replaces `skein gc` + `chunks delete-*`.")
+@click.option("--reingest", "do_reingest", is_flag=True, default=False,
+              help="Re-ingest the codebase at the current working directory. "
+                   "Replaces `skein ingest`.")
+def doctor(show_perf: bool, do_clean: bool, do_reingest: bool) -> None:
+    """Deep diagnostic: daemon, scopes, fragments, chunks, value distribution.
+
+    Subsumes (per ADR-002) the old `daemon status`, `daemon logs`, `events`
+    (snapshot), `preview`, `projects list`, `chunks stats / list / delete-*`,
+    and `gc` commands. The same surface answers "is Skein healthy?" and
+    "what's it actually holding?"
+
+    Optional flags:
+      --clean      run the interactive cleanup (replaces `skein gc`)
+      --reingest   re-ingest a codebase path (replaces `skein ingest`)
 
     Checks:
       - Config file exists and token is set
@@ -2471,6 +2608,15 @@ def doctor(show_perf: bool) -> None:
       - Claude Code has skein registered
       - AGENTS.md in cwd (if a scope is configured)
     """
+    # The --clean and --reingest flags are dispatch-style: each takes a
+    # specialised path that doesn't run the full diagnostic. The standard
+    # doctor flow (no flags) covers the read-only health checks.
+    if do_clean:
+        _doctor_clean()
+        return
+    if do_reingest:
+        _doctor_reingest()
+        return
     import shutil
     from . import ui
     from .config import _default_config_path, get_config
@@ -2607,6 +2753,46 @@ def doctor(show_perf: bool) -> None:
         except Exception:
             pass
 
+        # --- Q-05 / ADR-002: value-distribution histogram + inbox depth ---
+        try:
+            from .storage import Storage
+            st = Storage(cfg.db_path)
+            try:
+                rows = st._conn.execute(
+                    """SELECT
+                         SUM(CASE WHEN value >= 0.7 THEN 1 ELSE 0 END) AS high,
+                         SUM(CASE WHEN value >= 0.4 AND value < 0.7 THEN 1 ELSE 0 END) AS mid,
+                         SUM(CASE WHEN value < 0.4 THEN 1 ELSE 0 END) AS low,
+                         COUNT(*) AS total
+                       FROM fragments WHERE is_stale = 0"""
+                ).fetchone()
+                total = rows["total"] or 0
+                inbox = st.count_extraction_candidates(status="pending")
+                rejected = st.count_extraction_candidates(status="rejected")
+                approved = st.count_extraction_candidates(status="approved")
+                ui.step(
+                    "Fragment-value distribution",
+                    detail=(
+                        f"{rows['high'] or 0} high (≥0.7) · "
+                        f"{rows['mid'] or 0} mid (0.4-0.7) · "
+                        f"{rows['low'] or 0} low (<0.4) · "
+                        f"{total} live"
+                    ),
+                    state="ok",
+                )
+                ui.step(
+                    "Inbox",
+                    detail=(
+                        f"{inbox} pending · "
+                        f"{approved} approved · {rejected} rejected (auto-sweep handles these)"
+                    ),
+                    state="ok" if inbox < 200 else "warn",
+                )
+            finally:
+                st.close()
+        except Exception:
+            pass
+
     # --- Optional: perf measurements (`skein doctor --perf`) ---
     if show_perf and cfg_path.exists():
         import time as _time
@@ -2695,7 +2881,7 @@ def doctor(show_perf: bool) -> None:
 # scope (sub-group)
 # ---------------------------------------------------------------------------
 
-@main.group()
+@main.group(hidden=True)
 def scope() -> None:
     """Manage scopes (create, list, show lineage)."""
 
@@ -2784,7 +2970,7 @@ def scope_list(output_json: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-@main.group()
+@main.group(hidden=True)
 def docs() -> None:
     """Index the project's markdown documentation into Skein."""
 
@@ -2852,7 +3038,7 @@ def docs_sync(repo: Optional[str], scope: Optional[str]) -> None:
         st.close()
 
 
-@main.group()
+@main.group(hidden=True)
 def hook() -> None:
     """Hook handlers for Claude Code (and similar). Read stdin, write to stdout.
 
@@ -2895,7 +3081,7 @@ def hook_post_tool_use() -> None:
 # hooks (plural) — install/uninstall/list autonomous wiring
 # ---------------------------------------------------------------------------
 
-@main.group()
+@main.group(hidden=True)
 def hooks() -> None:
     """Install, list, or remove autonomous hooks in a project."""
 
@@ -3025,7 +3211,7 @@ def hooks_list(repo: Optional[str]) -> None:
 # ingest — codebase / document RAG
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("path", type=click.Path(exists=True, file_okay=False, dir_okay=True))
 @click.option("--scope", default=None, help="Target scope (default from config).")
 @click.option("--root", "source_root", default=None,
@@ -3079,7 +3265,7 @@ def ingest(
     from .config import get_config
     from .embeddings import get_provider as _get_emb
     from .ingest import (
-        DEFAULT_INCLUDE_EXTS, MAX_FILE_BYTES,
+        MAX_FILE_BYTES,
         ingest_directory,
     )
     from .models import IdentityCreate, ScopeCreate
@@ -3198,7 +3384,7 @@ def ingest(
 # search — codebase semantic search
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("query")
 @click.option("--scope", default=None)
 @click.option("--language", "-l", multiple=True,
@@ -3280,7 +3466,10 @@ def search(
             meta.append(f"[dim]{c.language}[/dim]")
         if c.symbol_name:
             meta.append(f"[yellow]{c.symbol_name}[/yellow]")
-        meta.append(f"[dim]score {r.score:.2f}[/dim]")
+        if r.cosine is not None:
+            meta.append(f"[dim]{r.quality} (cos {r.cosine:.2f})[/dim]")
+        else:
+            meta.append(f"[dim]{r.quality}[/dim]")
         console.print(
             f"  [bold cyan]{r.rank:>2}[/bold cyan]  " + "  ".join(meta)
         )
@@ -3304,7 +3493,7 @@ def search(
 # chunks (sub-group)
 # ---------------------------------------------------------------------------
 
-@main.group()
+@main.group(hidden=True)
 def chunks() -> None:
     """Manage the codebase RAG index (list, stats, delete-root)."""
 
@@ -3600,7 +3789,7 @@ def config_set(key: str, value: str) -> None:
 # archaeology — provenance-aware "where did this decision come from?"
 # ---------------------------------------------------------------------------
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("query")
 @click.option("--scope", default=None, help="Restrict to a scope handle. Defaults to auto-resolve.")
 @click.option("--limit", "-n", default=5, show_default=True, type=int,
@@ -3667,7 +3856,6 @@ def archaeology(query: str, scope: Optional[str], limit: int) -> None:
 
 def _render_archaeology(storage, frag, score: float) -> None:
     """Print one fragment's full provenance + walk supersede chain."""
-    import json as _json
     # Walk supersede chain backward (older → newer)
     chain = [frag]
     cur = frag
@@ -3725,7 +3913,7 @@ def _render_archaeology(storage, frag, score: float) -> None:
 # inbox — review queue for passively-extracted candidates
 # ---------------------------------------------------------------------------
 
-@main.group(invoke_without_command=True)
+@main.group(invoke_without_command=True, hidden=True)
 @click.option("--scope", default=None, help="Filter to a scope. Default: auto-resolve.")
 @click.option("--limit", "-n", default=20, show_default=True, type=int)
 @click.pass_context
@@ -3777,15 +3965,63 @@ def inbox(ctx: click.Context, scope: Optional[str], limit: int) -> None:
         storage.close()
 
 
+def _promote_candidate(
+    cand: dict,
+    *,
+    storage,
+    cfg,
+    commit_message_prefix: str = "inbox-approve",
+):
+    """Shared promote path: candidate dict → fragment + status flip.
+
+    Used by both ``inbox approve`` (single) and ``inbox auto-approve`` (bulk).
+    Returns the created Fragment on success, None if the candidate was already
+    reviewed.
+    """
+    from .models import CommitCreate, FragmentCreate, IdentityCreate
+    from .embeddings import get_provider as _get_provider, vec_to_bytes
+    from .auth import token_prefix as _tp
+
+    if cand["status"] != "pending":
+        return None
+    identity = storage.get_or_create_identity(IdentityCreate(
+        handle=f"user:{_tp(cfg.bearer_token)}", type="user", name="local-user",
+    ))
+    provider = _get_provider(cfg.embedding_provider)
+    embedding_bytes = None
+    try:
+        vec = provider.embed_one(cand["content"])
+        embedding_bytes = vec_to_bytes(vec)
+    except Exception:
+        pass
+    commit = storage.create_commit(CommitCreate(
+        author_id=identity.id, scope_id=cand["scope_id"],
+        message=f"[{commit_message_prefix}] {cand['content'][:60]}",
+    ))
+    frag = storage.create_fragment(
+        FragmentCreate(
+            content=cand["content"], type=cand["type"],
+            scope_id=cand["scope_id"], owner_id=identity.id,
+            territory=cand.get("territory"),
+            tags=json.loads(cand.get("tags") or "[]"),
+            created_by_tool=cand["source_tool"],
+            created_in_session_id=cand.get("source_session_id"),
+            extraction_method=cand["source_tool"],
+            extraction_confidence=cand["confidence"],
+        ),
+        commit_id=commit.id, embedding=embedding_bytes,
+    )
+    storage.mark_candidate_status(cand["id"], "approved",
+                                  promoted_fragment_id=frag.id)
+    return frag
+
+
 @inbox.command("approve")
 @click.argument("candidate_id")
 def inbox_approve(candidate_id: str) -> None:
     """Promote a pending candidate into a real fragment."""
     from .config import get_config
-    from .models import CommitCreate, FragmentCreate, IdentityCreate
     from .storage import Storage
-    from .embeddings import get_provider as _get_provider, vec_to_bytes
-    from .auth import token_prefix as _tp
     cfg = get_config()
     storage = Storage(cfg.db_path)
     try:
@@ -3801,39 +4037,10 @@ def inbox_approve(candidate_id: str) -> None:
             err_console.print(f"[red]✗[/red] Ambiguous prefix; matches {len(rows)} candidates.")
             sys.exit(1)
         cand = storage.get_extraction_candidate(rows[0]["id"])
-        if cand["status"] != "pending":
+        frag = _promote_candidate(cand, storage=storage, cfg=cfg)
+        if frag is None:
             err_console.print(f"[yellow]Already {cand['status']}.[/yellow]")
             return
-
-        identity = storage.get_or_create_identity(IdentityCreate(
-            handle=f"user:{_tp(cfg.bearer_token)}", type="user", name="local-user",
-        ))
-        provider = _get_provider(cfg.embedding_provider)
-        embedding_bytes = None
-        try:
-            vec = provider.embed_one(cand["content"])
-            embedding_bytes = vec_to_bytes(vec)
-        except Exception:
-            pass
-        commit = storage.create_commit(CommitCreate(
-            author_id=identity.id, scope_id=cand["scope_id"],
-            message=f"[inbox-approve] {cand['content'][:60]}",
-        ))
-        frag = storage.create_fragment(
-            FragmentCreate(
-                content=cand["content"], type=cand["type"],
-                scope_id=cand["scope_id"], owner_id=identity.id,
-                territory=cand.get("territory"),
-                tags=json.loads(cand.get("tags") or "[]"),
-                created_by_tool=cand["source_tool"],
-                created_in_session_id=cand.get("source_session_id"),
-                extraction_method=cand["source_tool"],
-                extraction_confidence=cand["confidence"],
-            ),
-            commit_id=commit.id, embedding=embedding_bytes,
-        )
-        storage.mark_candidate_status(cand["id"], "approved",
-                                       promoted_fragment_id=frag.id)
         console.print(
             f"[green]✓[/green] Approved → fragment {frag.id[:8]}… "
             f"({frag.type})"
@@ -3862,6 +4069,140 @@ def inbox_reject(candidate_id: str) -> None:
             console.print(f"[yellow]✗[/yellow] Rejected.")
         else:
             console.print("[dim]Already reviewed.[/dim]")
+    finally:
+        storage.close()
+
+
+@inbox.command("auto-approve")
+@click.option("--min-confidence", type=float, default=0.85, show_default=True,
+              help="Only promote candidates with confidence >= this value.")
+@click.option("--min-age-days", type=int, default=0, show_default=True,
+              help="Only promote candidates that have been in the queue for "
+                   "at least this many days. 0 = no age constraint.")
+@click.option("--scope", default=None,
+              help="Filter to a single scope handle. Default: every scope.")
+@click.option("--limit", type=int, default=500, show_default=True,
+              help="Safety cap on how many candidates to promote per run.")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Show what would be promoted without writing anything.")
+def inbox_auto_approve(
+    min_confidence: float,
+    min_age_days: int,
+    scope: Optional[str],
+    limit: int,
+    dry_run: bool,
+) -> None:
+    """Bulk-promote pending candidates above a confidence threshold.
+
+    Background: passive extractors enqueue medium-confidence findings
+    awaiting human review. In practice the queue tends to grow faster than a
+    user can drain it, and a thick queue starves recall because the high-
+    confidence facts never join the search index. This command bleeds the
+    queue back down by trusting passive extraction's own confidence score.
+
+    Defaults are intentionally conservative — confidence >= 0.85 catches the
+    near-certain auto-extractions that just missed the auto-promote ceiling.
+    Tighten with --min-age-days when you'd rather wait a few days to give
+    yourself a chance to reject obvious garbage first.
+    """
+    from datetime import datetime, timedelta, timezone
+    from .config import get_config
+    from .scope_resolver import resolve_scope
+    from .storage import Storage
+
+    cfg = get_config()
+    storage = Storage(cfg.db_path)
+    try:
+        scope_id: Optional[str] = None
+        if scope:
+            handle = scope
+        else:
+            handle = resolve_scope(None, config_default=cfg.default_scope)[0]
+        scope_obj = storage.get_scope(handle) if scope else None
+        if scope_obj is not None:
+            scope_id = scope_obj.id
+
+        candidates = storage.list_extraction_candidates(
+            scope_id=scope_id, limit=limit,
+        )
+        if min_age_days > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=min_age_days)
+
+            def _too_young(c: dict) -> bool:
+                created = c.get("created_at")
+                if not created:
+                    return False
+                # SQLite's ``datetime('now')`` emits a space-separated string
+                # ("2026-05-17 12:34:56") which ``datetime.fromisoformat``
+                # rejects on Python 3.9/3.10 — pyproject still supports 3.9,
+                # so normalise to the T-separated form before parsing.
+                # Also accept the "...Z" suffix Skein writes from Python-side
+                # iso timestamps.
+                normalised = created.replace(" ", "T", 1).replace("Z", "+00:00")
+                try:
+                    ts = datetime.fromisoformat(normalised)
+                except ValueError:
+                    return False
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                return ts > cutoff
+
+            candidates = [c for c in candidates if not _too_young(c)]
+        eligible = [c for c in candidates if c["confidence"] >= min_confidence]
+
+        if not eligible:
+            console.print(
+                f"[dim]No pending candidates with confidence "
+                f">= {min_confidence:.2f}"
+                + (f" and age >= {min_age_days}d" if min_age_days else "")
+                + ".[/dim]"
+            )
+            return
+
+        console.print(
+            f"[bold]{len(eligible)}[/bold] candidate"
+            f"{'s' if len(eligible) != 1 else ''} eligible "
+            f"(confidence >= {min_confidence:.2f}"
+            + (f", age >= {min_age_days}d" if min_age_days else "")
+            + ")."
+        )
+        if dry_run:
+            for c in eligible[:20]:
+                console.print(
+                    f"  [yellow]{c['id'][:8]}…[/yellow]  "
+                    f"[magenta]{c['type']:11}[/magenta]  "
+                    f"[dim]conf={c['confidence']:.2f}[/dim]  "
+                    f"{c['content'][:120]}"
+                )
+            if len(eligible) > 20:
+                console.print(f"  [dim]…and {len(eligible) - 20} more[/dim]")
+            console.print("[dim]Dry run — nothing written.[/dim]")
+            return
+
+        promoted = 0
+        skipped = 0
+        for c in eligible:
+            try:
+                frag = _promote_candidate(
+                    c, storage=storage, cfg=cfg,
+                    commit_message_prefix="inbox-auto-approve",
+                )
+            except Exception as e:
+                err_console.print(
+                    f"[red]✗[/red] {c['id'][:8]}… failed: {e}"
+                )
+                skipped += 1
+                continue
+            if frag is None:
+                skipped += 1
+            else:
+                promoted += 1
+        console.print(
+            f"[green]✓[/green] Promoted {promoted} fragment"
+            f"{'s' if promoted != 1 else ''}"
+            + (f", skipped {skipped}" if skipped else "")
+            + "."
+        )
     finally:
         storage.close()
 

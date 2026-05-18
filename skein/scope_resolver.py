@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 
 def auto_detect_scope(start: Optional[Path] = None) -> str:
@@ -106,7 +106,7 @@ def resolve_scope(
     *,
     config_default: Optional[str] = None,
     start: Optional[Path] = None,
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """Resolve the scope to use, plus a one-word source label for telemetry.
 
     Returns ``(scope_handle, source)`` where ``source`` is one of:

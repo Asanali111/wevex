@@ -28,7 +28,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("skein.events")
 
@@ -41,7 +41,8 @@ def default_path() -> Path:
     env = os.environ.get("SKEIN_EVENTS_PATH")
     if env:
         return Path(env)
-    return Path.home() / ".config" / "skein" / "events.jsonl"
+    from . import paths as _skein_paths
+    return _skein_paths.events_jsonl_path()
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +68,7 @@ class EventLogger:
         """Append one event. Never raises."""
         try:
             self._maybe_rotate()
-            record: Dict[str, Any] = {
+            record: dict[str, Any] = {
                 "ts": _now_iso(),
                 "event": event,
             }

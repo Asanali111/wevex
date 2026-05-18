@@ -20,7 +20,6 @@ from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from .config import SkeinConfig, get_config
 from .dependencies import set_provider, set_storage
@@ -97,6 +96,14 @@ async def lifespan(app: FastAPI):
     # Background maintenance tasks
     task1 = asyncio.create_task(_lease_cleanup_loop(storage, cfg.lease_cleanup_interval))
     task2 = asyncio.create_task(_stale_mark_loop(storage, cfg.stale_mark_interval))
+    # ADR-002 / iter 26: daemon-side replacements for deleted CLI commands.
+    # Auto-sync owns AGENTS.md regen; auto-approve drains the inbox.
+    task3 = asyncio.create_task(_agents_md_sync_loop(
+        cfg.db_path, cfg.base_url, cfg.agents_md_sync_interval,
+    ))
+    task4 = asyncio.create_task(_inbox_auto_approve_loop(
+        cfg.db_path, cfg, provider, cfg.inbox_auto_approve_interval,
+    ))
 
     # Common setup for the two passive watchers — both need their own SQLite
     # handle per poll and the local-user identity.
@@ -152,6 +159,8 @@ async def lifespan(app: FastAPI):
 
     task1.cancel()
     task2.cancel()
+    task3.cancel()
+    task4.cancel()
     for w in (git_watcher, transcript_watcher):
         if w is not None:
             try:
@@ -238,3 +247,141 @@ async def _stale_mark_loop(storage: Storage, interval: int) -> None:
             storage.mark_expired_fragments_stale()
         except Exception as e:
             logger.warning("Stale-mark error: %s", e)
+
+
+async def _agents_md_sync_loop(db_path: str, daemon_url: str, interval: int) -> None:
+    """ADR-002 / iter 26: replace `skein sync` with a daemon-side regen.
+
+    For each registered project, render AGENTS.md, hash the bytes, and only
+    write if the hash differs from what's on disk. Opens its own Storage
+    handle per sweep so the loop is independent of the lifespan-managed
+    primary connection.
+    """
+    from .agents_md import sync_agents_md_for_project
+    from .projects import list_projects
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            from pathlib import Path
+            projects = list_projects()
+        except Exception as e:
+            logger.warning("agents_md sync: list_projects failed: %s", e)
+            continue
+        if not projects:
+            continue
+        try:
+            sweep_storage = Storage(db_path)
+        except Exception as e:
+            logger.warning("agents_md sync: open storage failed: %s", e)
+            continue
+        try:
+            for project in projects:
+                try:
+                    root = Path(project.root)
+                    if not root.is_dir():
+                        continue
+                    sync_agents_md_for_project(
+                        storage=sweep_storage,
+                        scope_handle=project.scope,
+                        repo_root=root,
+                        daemon_url=daemon_url,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "agents_md sync failed for %s: %s", project.scope, e,
+                    )
+        finally:
+            sweep_storage.close()
+
+
+async def _inbox_auto_approve_loop(db_path: str, cfg, provider, interval: int) -> None:
+    """ADR-002 / iter 26: replace `skein inbox auto-approve` with a daemon
+    sweep. Anything above the confidence threshold gets promoted to a real
+    fragment; anything older than ``inbox_auto_reject_days`` that's still
+    pending gets marked rejected so the queue self-drains.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from .embeddings import vec_to_bytes
+    from .models import CommitCreate, FragmentCreate, IdentityCreate
+    from .auth import token_prefix as _tp
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            sweep_storage = Storage(db_path)
+        except Exception as e:
+            logger.warning("inbox auto-approve: open storage failed: %s", e)
+            continue
+        try:
+            candidates = sweep_storage.list_extraction_candidates(limit=500)
+            if not candidates:
+                continue
+            owner = sweep_storage.get_or_create_identity(IdentityCreate(
+                handle=f"user:{_tp(cfg.bearer_token)}",
+                type="user", name="local-user",
+            ))
+            promote_threshold = cfg.inbox_auto_approve_threshold
+            reject_cutoff = datetime.now(timezone.utc) - timedelta(
+                days=cfg.inbox_auto_reject_days,
+            )
+            promoted = 0
+            rejected = 0
+            for c in candidates:
+                created_raw = c.get("created_at") or ""
+                normalised = created_raw.replace(" ", "T", 1).replace("Z", "+00:00")
+                try:
+                    ts = datetime.fromisoformat(normalised)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    ts = None
+                # Promote high-confidence
+                if c["confidence"] >= promote_threshold:
+                    try:
+                        commit = sweep_storage.create_commit(CommitCreate(
+                            author_id=owner.id, scope_id=c["scope_id"],
+                            message=f"[auto-approve] {c['content'][:60]}",
+                        ))
+                        import json as _json
+                        emb_bytes = None
+                        try:
+                            vec = provider.embed_one(c["content"])
+                            emb_bytes = vec_to_bytes(vec)
+                        except Exception:
+                            pass
+                        frag = sweep_storage.create_fragment(
+                            FragmentCreate(
+                                content=c["content"], type=c["type"],
+                                scope_id=c["scope_id"], owner_id=owner.id,
+                                territory=c.get("territory"),
+                                tags=_json.loads(c.get("tags") or "[]"),
+                                created_by_tool=c["source_tool"],
+                                extraction_method=c["source_tool"],
+                                extraction_confidence=c["confidence"],
+                                metadata={"promoted_via": "inbox-auto-approve"},
+                            ),
+                            commit_id=commit.id, embedding=emb_bytes,
+                        )
+                        sweep_storage.mark_candidate_status(
+                            c["id"], "approved", promoted_fragment_id=frag.id,
+                        )
+                        promoted += 1
+                    except Exception as e:
+                        logger.warning(
+                            "inbox auto-approve: promote %s failed: %s",
+                            c["id"][:8], e,
+                        )
+                # Reject anything too old that didn't clear the threshold.
+                elif ts is not None and ts < reject_cutoff:
+                    if sweep_storage.mark_candidate_status(c["id"], "rejected"):
+                        rejected += 1
+            if promoted or rejected:
+                logger.info(
+                    "inbox sweep: promoted=%d rejected=%d", promoted, rejected,
+                )
+        except Exception as e:
+            logger.warning("inbox auto-approve loop error: %s", e)
+        finally:
+            sweep_storage.close()

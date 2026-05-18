@@ -7,6 +7,7 @@ the "_pick_backend" logic and on real hardware in `skein up`.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -55,6 +56,15 @@ class TestBackendPicker:
     def test_nohup_on_linux_without_systemctl(self, monkeypatch):
         monkeypatch.setattr("platform.system", lambda: "Linux")
         monkeypatch.setattr("shutil.which", lambda x: None)
+        assert daemon_mod._pick_backend(persist=True) == "nohup"
+
+    def test_nohup_on_windows(self, monkeypatch):
+        # Iter 27 Windows port: there is no native auto-start service
+        # registration; persist=True still resolves to "nohup", which on
+        # Windows means subprocess.Popen with CREATE_NEW_PROCESS_GROUP |
+        # DETACHED_PROCESS via _proc.spawn_detached. Reboot persistence is
+        # a future Task Scheduler follow-up.
+        monkeypatch.setattr("platform.system", lambda: "Windows")
         assert daemon_mod._pick_backend(persist=True) == "nohup"
 
 
@@ -106,17 +116,22 @@ class TestNohupBackend:
         # Plant a pid file
         daemon_mod.NOHUP_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
         daemon_mod.NOHUP_PID_FILE.write_text("99999")
+        # Iter 27 Windows port: _stop_nohup now delegates the actual
+        # process-termination to _proc.terminate_pid (POSIX uses SIGTERM/
+        # SIGKILL, Windows uses CTRL_BREAK_EVENT/TerminateProcess via
+        # ctypes). Monkeypatching the helper is more honest about the
+        # contract than monkeypatching os.kill — and works on every
+        # platform.
+        from skein import _proc
         killed = []
-        def fake_kill(pid, sig):
-            killed.append((pid, sig))
-            # Pretend it's dead after first kill
-            if len(killed) > 1:
-                raise ProcessLookupError()
-        monkeypatch.setattr("os.kill", fake_kill)
+        def fake_terminate(pid, **kwargs):
+            killed.append(pid)
+            return True
+        monkeypatch.setattr(_proc, "terminate_pid", fake_terminate)
         daemon_mod._stop_nohup()
-        # PID file should be gone, kill should have been called
+        # PID file should be gone, terminate_pid should have been called
         assert not daemon_mod.NOHUP_PID_FILE.exists()
-        assert killed and killed[0][0] == 99999
+        assert killed == [99999]
 
     def test_stop_silent_when_no_pid_file(self, isolated_home):
         # Should not raise
@@ -176,6 +191,14 @@ class TestTCCDetection:
         bad_path.touch()
         assert daemon_mod.is_tcc_protected_path(bad_path) is False
 
+    @pytest.mark.skipif(
+        sys.platform.startswith("win") or os.name == "nt",
+        reason=(
+            "is_tcc_protected_path is macOS-only (short-circuits to False on "
+            "everything else); also symlink creation on Windows requires "
+            "Developer Mode or admin elevation, which CI runners don't grant."
+        ),
+    )
     def test_resolves_symlinks(self, tmp_path, monkeypatch):
         """A symlink in /usr/local/bin pointing into Documents must be detected."""
         monkeypatch.setattr("platform.system", lambda: "Darwin")

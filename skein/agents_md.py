@@ -1,4 +1,4 @@
-"""AGENTS.md renderer.
+"""AGENTS.md renderer + writer.
 
 Renders a canonical AGENTS.md from:
   - A header with Skein daemon URL and how to recall context
@@ -6,17 +6,28 @@ Renders a canonical AGENTS.md from:
   - A "current state" snapshot (≤500 tokens) from state fragments
   - A footer noting the CLAUDE.md shim
 
-``skein sync`` calls this and writes the output to <repo>/AGENTS.md.
 The ``<!-- @user -->`` block is preserved across regenerations.
+
+ADR-002 / iter 26: the daemon now keeps AGENTS.md in sync automatically.
+``sync_agents_md_for_project`` is the single write path — called by both
+``skein up`` for first-render and by the daemon's auto-sync loop (server.py)
+on every interval. It hashes the rendered bytes and skips the disk write
+when nothing changed, so the file doesn't get touched (and the watcher
+doesn't get tickled) on every sweep.
 """
 from __future__ import annotations
 
+import hashlib
+import logging
 import re
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Optional
 
 from .models import Fragment
 from .storage import Storage
+
+logger = logging.getLogger("skein.agents_md")
 
 # Sentinel block that users can fill with custom content (preserved on sync)
 _USER_BLOCK_START = "<!-- @user -->"
@@ -59,7 +70,7 @@ def render_agents_md(
     name = project_name or scope.name or scope_handle
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    lines: List[str] = []
+    lines: list[str] = []
 
     # ---- Header ----
     lines.append(f"# AGENTS.md — {name}")
@@ -90,7 +101,7 @@ def render_agents_md(
     lines.append("3. Only fall back to `read_file` / `grep` for code-execution details that semantic recall can't give.")
     lines.append("4. After any non-obvious decision, call `remember(...)` or `note_decision(...)` so other tools (and you in a future session) inherit it.")
     lines.append("")
-    lines.append("If `recall` returns top score < 0.1, Skein has nothing high-signal for that query — fall back to source. Honest no-knowledge is more useful than weak hits.")
+    lines.append("Each `recall` result carries a `quality` bucket: `high` / `medium` / `low` / `none`. If the top result is `quality=none`, Skein has nothing high-signal for that query — fall back to source. Honest no-knowledge is more useful than weak hits.")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -125,7 +136,7 @@ def render_agents_md(
         )
         lines.append("")
         # Group by source tool for clarity
-        by_tool: Dict[str, List] = {}
+        by_tool: dict[str, list] = {}
         for f in fact_frags:
             tool = f.created_by_tool or "unknown"
             by_tool.setdefault(tool, []).append(f)
@@ -218,7 +229,7 @@ def render_claude_md_shim() -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _append_fragment_bullet(lines: List[str], frag: Fragment) -> None:
+def _append_fragment_bullet(lines: list[str], frag: Fragment) -> None:
     territory = f" *(territory: {frag.territory})*" if frag.territory else ""
     tags = f" [tags: {', '.join(frag.tags)}]" if frag.tags else ""
     lines.append(f"- {frag.content}{territory}{tags}")
@@ -248,3 +259,48 @@ def _minimal_agents_md(scope_handle: str, daemon_url: str) -> str:
         f"> Skein daemon: {daemon_url}/mcp\n\n"
         f"Scope `{scope_handle}` not found. Run `skein init` to set up.\n"
     )
+
+
+def sync_agents_md_for_project(
+    *,
+    storage: Storage,
+    scope_handle: str,
+    repo_root: Path,
+    daemon_url: str,
+    write_claude_md_shim: bool = True,
+) -> bool:
+    """Render and (if changed) write AGENTS.md for a single project.
+
+    Used by both ``skein up`` and the daemon auto-sync loop. Returns True
+    if the file was rewritten, False if nothing changed. Idempotent: the
+    rendered hash is compared to the on-disk file's hash so an unmodified
+    file is left exactly alone (preserving its mtime and not tickling
+    file watchers).
+    """
+    agents_md_path = repo_root / "AGENTS.md"
+    existing = agents_md_path.read_text() if agents_md_path.exists() else None
+    rendered = render_agents_md(
+        scope_handle=scope_handle,
+        storage=storage,
+        daemon_url=daemon_url,
+        existing_content=existing,
+    )
+    rendered_hash = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+    on_disk_hash = (
+        hashlib.sha256(existing.encode("utf-8")).hexdigest()
+        if existing is not None else None
+    )
+    if on_disk_hash == rendered_hash:
+        # Update the state row anyway so the daemon doesn't keep re-rendering
+        # when the file is already correct — cheap idempotent write.
+        storage.upsert_agents_md_state(scope_handle, str(agents_md_path), rendered_hash)
+        return False
+
+    agents_md_path.parent.mkdir(parents=True, exist_ok=True)
+    agents_md_path.write_text(rendered)
+    if write_claude_md_shim:
+        claude_md_path = repo_root / "CLAUDE.md"
+        if not claude_md_path.exists():
+            claude_md_path.write_text("@AGENTS.md\n")
+    storage.upsert_agents_md_state(scope_handle, str(agents_md_path), rendered_hash)
+    return True

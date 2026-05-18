@@ -20,19 +20,21 @@ from __future__ import annotations
 import logging
 import os
 import re
-import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
+from . import _proc, paths as _skein_paths
 from .projects import ProjectEntry
 
 logger = logging.getLogger("skein.watcher_manager")
 
-WATCHER_PID_DIR = Path.home() / ".config" / "skein" / "watchers"
-WATCHER_LOG_DIR = Path.home() / ".config" / "skein" / "logs"
+# Both move to %APPDATA%\skein\ on Windows, stay at ~/.config/skein/ on
+# macOS / Linux. See skein/paths.py.
+WATCHER_PID_DIR = _skein_paths.watcher_pid_dir()
+WATCHER_LOG_DIR = _skein_paths.watcher_log_dir()
 
 
 def _slug(text: str) -> str:
@@ -56,13 +58,10 @@ def _read_pid(pid_file: Path) -> Optional[int]:
 
 
 def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True   # process exists but we don't own it (rare here)
+    # Thin alias kept for readability at call sites. The cross-platform
+    # probe lives in _proc.pid_alive — os.kill(pid, 0) on Windows raises
+    # OSError("Invalid argument") and breaks the original implementation.
+    return _proc.pid_alive(pid)
 
 
 def is_running(entry: ProjectEntry) -> bool:
@@ -106,17 +105,16 @@ def spawn(entry: ProjectEntry, *, skein_bin: Optional[str] = None) -> Optional[i
         "--source-root", entry.source_root,
     ]
     # The child inherits a dup of the log FD; the parent's handle must close
-    # after Popen or each spawn leaks one FD into the daemon process forever.
+    # after spawn_detached or each spawn leaks one FD into the daemon
+    # process forever. Detach mechanics (start_new_session on POSIX vs
+    # CREATE_NEW_PROCESS_GROUP on Windows) live in skein/_proc.py.
     with open(log_file, "ab") as log_handle:
-        proc = subprocess.Popen(
+        pid = _proc.spawn_detached(
             cmd,
             stdout=log_handle, stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
         )
-    pid_file_for(entry).write_text(str(proc.pid))
-    return proc.pid
+    pid_file_for(entry).write_text(str(pid))
+    return pid
 
 
 def kill(entry: ProjectEntry) -> bool:
@@ -129,29 +127,17 @@ def kill(entry: ProjectEntry) -> bool:
         except OSError:
             pass
         return False
+    # Graceful → hard kill across platforms (SIGTERM/SIGKILL on POSIX,
+    # CTRL_BREAK_EVENT/TerminateProcess on Windows).
+    _proc.terminate_pid(pid, timeout=2.0)
     try:
-        os.kill(pid, signal.SIGTERM)
-        # Wait briefly for graceful shutdown
-        for _ in range(20):
-            if not _alive(pid):
-                break
-            time.sleep(0.1)
-        else:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-    except ProcessLookupError:
+        pid_file.unlink()
+    except OSError:
         pass
-    finally:
-        try:
-            pid_file.unlink()
-        except OSError:
-            pass
     return True
 
 
-def kill_all() -> List[ProjectEntry]:
+def kill_all() -> list[ProjectEntry]:
     """Stop every active watcher. Returns the entries that were running."""
     from .projects import list_projects
     killed = []

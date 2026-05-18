@@ -9,7 +9,7 @@ ingest over HTTP because:
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -56,7 +56,7 @@ def search_get(
     return search_chunks(req, storage, provider)
 
 
-@router.get("", response_model=List[Chunk])
+@router.get("", response_model=list[Chunk])
 def list_chunks(
     scope: str = Query(..., description="Scope handle or ID"),
     source_root: Optional[str] = None,
@@ -65,7 +65,7 @@ def list_chunks(
     offset: int = 0,
     auth: AuthContext = RequireAuth,
     storage: Storage = Depends(get_storage),
-) -> List[Chunk]:
+) -> list[Chunk]:
     scope_obj = storage.get_scope(scope)
     if not scope_obj:
         raise HTTPException(status_code=404, detail=f"Scope '{scope}' not found")
