@@ -214,6 +214,12 @@ def up(
     from .scope_resolver import auto_detect_scope
     from .storage import Storage
     from .sync import sync_all
+    # Imported once at the top so every reference below is bound. Python
+    # turns `ui` into a function-local because of the later `from . import
+    # ui` statements; if those run lazily the early references (ingest
+    # progress line, scanner block) raise UnboundLocalError. Hoisting fixes
+    # a pre-existing latent crash on the warm-ingest path.
+    from . import ui
 
     repo_path = Path(path).resolve()
 
@@ -222,16 +228,15 @@ def up(
     if not cfg_path.exists():
         from .embeddings import best_available_provider_name
         token = generate_token()
-        # Pick semantic search if the user has an API key; otherwise default
-        # to bm25 — honest about being keyword-only. ``hash`` is never picked
-        # automatically; it's tests-only.
+        # Default new installs to local fastembed (no API key, ~130 MB
+        # one-time model download). If the fastembed library somehow isn't
+        # importable, fall back to bm25 (FTS5-only) so init still succeeds.
         embedding_provider = best_available_provider_name()
-        if embedding_provider == "gemini":
+        if embedding_provider == "fastembed":
             try:
                 import importlib
-                importlib.import_module("google.genai")
+                importlib.import_module("fastembed")
             except ImportError:
-                # Library missing — fall back to bm25 rather than crash later
                 embedding_provider = "bm25"
         cfg = SkeinConfig({
             "bearer_token": token,
@@ -242,7 +247,8 @@ def up(
         console.print(f"[green]✓[/green] Initialised config at [dim]{cfg_path}[/dim]")
         console.print(
             f"[dim]Embedding provider: [bold]{embedding_provider}[/bold]"
-            + (" (set GEMINI_API_KEY to enable semantic search)"
+            + (" (fastembed not installed — run "
+               "[bold]pip install fastembed[/bold] to enable semantic search)"
                if embedding_provider == "bm25" else "")
             + "[/dim]"
         )
@@ -318,6 +324,15 @@ def up(
                     skein_bin_for_daemon = str(new_bin)
                     console.print(f"[green]✓[/green] Relocated to [dim]{new_bin}[/dim]")
 
+    # Iter 28: capture whether the daemon was already healthy at entry. The
+    # warm path (daemon up + project already registered) can skip the
+    # MCP-client resync (idempotent, costly per-client subprocess fan-out)
+    # and the file-walking ingest_directory call (the watcher subprocess
+    # already covers incremental re-ingest). Saves ~5–8 s on every warm
+    # `skein up`.
+    from .daemon import _check_health as _probe_health
+    was_already_healthy = _probe_health(cfg.base_url)
+
     method_label = "background service" if not no_persist else "foreground (this terminal)"
     with console.status(f"[dim]Ensuring daemon is running ({method_label})…[/dim]",
                         spinner="dots"):
@@ -377,7 +392,14 @@ def up(
                     err_console.print(f"[red]✗[/red] {e}")
 
         # ---- 6. sync MCP configs ----
-        if not no_sync:
+        # Iter 28: on the warm path (daemon already healthy at entry) the
+        # per-client MCP config fan-out is skipped — each client.connect()
+        # spawns a subprocess (e.g. `claude mcp add`) and the configs are
+        # idempotent and rarely changed. The daemon's `_agents_md_sync_loop`
+        # owns AGENTS.md regen so it still picks up new fragments within
+        # `agents_md_sync_interval` (60 s default). `skein connect` is the
+        # explicit path when the user actually adds a new client.
+        if not no_sync and not was_already_healthy:
             from . import connections as conns
             connected = conns.get_connected_ids()
             if not connected:
@@ -451,17 +473,30 @@ def up(
                     )
 
         # ---- 7. ingest ----
-        if not no_ingest:
+        # Iter 28: on the warm path the watcher subprocess is already
+        # running incremental re-ingest, so the explicit walk-and-chunk
+        # below adds nothing but latency. The daemon's passive_scan loop
+        # owns the package-manifest + docs path. Skip entirely when the
+        # daemon was healthy on entry.
+        run_ingest = not no_ingest and not was_already_healthy
+        shared_provider = None
+        shared_provider_err: Optional[str] = None
+        if run_ingest:
+            try:
+                shared_provider = _get_emb(cfg.embedding_provider)
+            except Exception as e:
+                shared_provider_err = str(e)
+
+        if run_ingest:
             from .ingest import count_ingestable_files
 
-            try:
-                provider = _get_emb(cfg.embedding_provider)
-            except Exception as e:
+            if shared_provider is None:
                 err_console.print(
-                    f"  {ui.mark('warn')} Embedding provider unavailable: {e}"
+                    f"  {ui.mark('warn')} Embedding provider unavailable: "
+                    f"{shared_provider_err}"
                 )
                 ui.hint("Continuing with keyword-only ingest.")
-                provider = None
+            provider = shared_provider
 
             # Pre-walk so we know what we're getting into.
             try:
@@ -548,103 +583,14 @@ def up(
     finally:
         storage.close()
 
-    # ---- 7b. passive code scan (iter 14.1) ----
-    # Extract implicit facts from package.json / pyproject.toml / Dockerfile /
-    # CI config / etc. Promotes high-confidence facts directly; queues
-    # medium-confidence ones for `skein inbox`.
-    try:
-        from . import ui
-        from .scanner import scan_project
-        from .passive import promote_scanned_facts
-        from .config import get_config as _gc
-        # Re-open storage briefly for the scan since we just closed it above
-        cfg2 = _gc()
-        from .storage import Storage as _Storage
-        st = _Storage(cfg2.db_path)
-        try:
-            facts = scan_project(repo_path)
-            if facts:
-                scope_obj_now = st.get_scope(scope_handle)
-                from .auth import token_prefix as _tp
-                from .models import IdentityCreate
-                identity = st.get_or_create_identity(IdentityCreate(
-                    handle=f"user:{_tp(cfg.bearer_token)}",
-                    type="user", name="local-user",
-                ))
-                provider = _get_emb(cfg.embedding_provider)
-                res = promote_scanned_facts(
-                    facts, storage=st, provider=provider,
-                    scope_id=scope_obj_now.id, owner_id=identity.id,
-                    source_tool="code-scanner",
-                )
-                if res.auto_promoted or res.queued:
-                    ui.step(
-                        f"Scanned project for implicit facts",
-                        detail=(
-                            f"{res.auto_promoted} auto-stored · "
-                            f"{res.queued} queued for review · "
-                            f"{res.duplicate} already known · "
-                            f"{res.discarded} discarded"
-                        ),
-                        state="ok",
-                    )
-                    if res.queued:
-                        ui.hint("Review with [bold]skein inbox[/bold].")
-        finally:
-            st.close()
-    except Exception as e:
-        from . import ui
-        err_console.print(
-            f"  {ui.mark('warn')} Code scanner skipped: {e}"
-        )
-
-    # ---- 7c. passive docs scan (iter 19) ----
-    # Index README / CHANGELOG / docs/** / ADRs as fragments so `recall` returns
-    # the project's own documentation, not just scanner trivia.
-    try:
-        from . import ui
-        from .docs_watcher import scan_docs
-        from .passive import promote_scanned_facts
-        from .config import get_config as _gc
-        from .storage import Storage as _Storage
-        cfg2 = _gc()
-        st = _Storage(cfg2.db_path)
-        try:
-            doc_facts = scan_docs(repo_path)
-            if doc_facts:
-                scope_obj_now = st.get_scope(scope_handle)
-                from .auth import token_prefix as _tp
-                from .models import IdentityCreate
-                identity = st.get_or_create_identity(IdentityCreate(
-                    handle=f"user:{_tp(cfg.bearer_token)}",
-                    type="user", name="local-user",
-                ))
-                provider = _get_emb(cfg.embedding_provider)
-                res = promote_scanned_facts(
-                    doc_facts, storage=st, provider=provider,
-                    scope_id=scope_obj_now.id, owner_id=identity.id,
-                    source_tool="docs-scanner",
-                )
-                if res.auto_promoted or res.superseded:
-                    ui.step(
-                        "Indexed project documentation",
-                        detail=(
-                            f"{res.auto_promoted} new · "
-                            f"{res.superseded} updated · "
-                            f"{res.duplicate} unchanged"
-                        ),
-                        state="ok",
-                    )
-        finally:
-            st.close()
-    except Exception as e:
-        from . import ui
-        err_console.print(
-            f"  {ui.mark('warn')} Docs scanner skipped: {e}"
-        )
+    # ---- 7b/7c. Passive code + docs scans now live in the daemon ----
+    # Iter 28: the synchronous scan_project / scan_docs blocks moved into
+    # `skein/server.py::_passive_scan_loop` so `skein up` returns as soon
+    # as the daemon is healthy. The daemon picks up new package manifests
+    # and READMEs within `passive_scan_interval` (default 300 s) which is
+    # well inside the user's "open editor" window.
 
     # ---- 8. friendly summary ----
-    from . import ui
     ui.header("Skein is ready", state="ok")
     home = str(Path.home())
     ui.fields([
@@ -942,9 +888,9 @@ def projects_remove(root_or_scope: str) -> None:
 @click.option("--port", default=8765, type=int, show_default=True)
 @click.option("--host", default="127.0.0.1", show_default=True)
 @click.option("--embedding-provider", default=None,
-              type=click.Choice(["bm25", "gemini", "openai", "hash"]),
-              help="Embedding provider. Default: bm25 (keyword-only) unless "
-                   "GEMINI_API_KEY/OPENAI_API_KEY is set, then auto-picks the real one.")
+              type=click.Choice(["fastembed", "openai", "bm25", "hash"]),
+              help="Embedding provider. Default: fastembed (local, 384-dim, "
+                   "no API key, ~130 MB one-time model download).")
 @click.option("--scope", "default_scope", default="project:default",
               show_default=True,
               help="Default scope handle for this installation.")
@@ -981,18 +927,17 @@ def init(
     from . import paths as _skein_paths
     effective_db = db_path or str(_skein_paths.default_db_path())
 
-    # If the user didn't pass --embedding-provider, auto-pick the best
-    # available: gemini > openai > bm25. Never auto-pick 'hash' — it's
-    # tests-only and emits a doctor warning when active in production.
+    # Default is fastembed (local, no API key). Fall back to bm25 only if
+    # the library isn't importable. Never auto-pick 'hash' or 'openai' —
+    # 'hash' is tests-only, 'openai' requires explicit opt-in.
     auto_upgraded = False
     if embedding_provider is None:
         from .embeddings import best_available_provider_name
         embedding_provider = best_available_provider_name()
-        # If we picked gemini but the SDK isn't installed, downgrade to bm25
-        if embedding_provider == "gemini":
+        if embedding_provider == "fastembed":
             try:
                 import importlib
-                importlib.import_module("google.genai")
+                importlib.import_module("fastembed")
                 auto_upgraded = True
             except ImportError:
                 embedding_provider = "bm25"
@@ -1009,11 +954,15 @@ def init(
 
     embed_note = ""
     if auto_upgraded:
-        embed_note = "\n[bold green]✓[/bold green] Detected GEMINI_API_KEY — using real embeddings."
+        embed_note = (
+            "\n[bold green]✓[/bold green] Using fastembed (local BGE-small, "
+            "384-dim) — semantic search, no API key."
+        )
     elif embedding_provider == "hash":
         embed_note = (
             "\n[yellow]⚠[/yellow]  Using offline 'hash' embeddings (no semantic quality).\n"
-            "    Set GEMINI_API_KEY and run [bold]skein config set embedding_provider gemini[/bold]."
+            "    Install [bold]fastembed[/bold] and run "
+            "[bold]skein config set embedding_provider fastembed[/bold]."
         )
 
     # Seed the default scope in the DB (deferred until serve, but record it now)
@@ -1073,6 +1022,31 @@ def serve(
             "Run [bold]skein init[/bold] first."
         )
         sys.exit(1)
+
+    # Iter 28 Windows port: when `skein serve` is launched by a Windows
+    # Scheduled Task (`schtasks /Run`), there is no console attached and
+    # nothing redirects stdout/stderr. macOS' launchd plist sets
+    # ``StandardOutPath`` / ``StandardErrorPath`` and systemd's unit does
+    # ``StandardOutput=append:…`` — schtasks has no such knob. Replicate
+    # those by tee-ing the streams to ``daemon.out`` / ``daemon.err`` under
+    # ``skein_home() / "logs"`` whenever we detect we're running headless
+    # (no controlling TTY). The same redirection is harmless on launchd /
+    # systemd because those backends already redirect at the OS level —
+    # the second redirect just appends an extra copy nobody reads.
+    import sys as _sys
+    if not _sys.stdout.isatty():
+        from . import paths as _skein_paths
+        log_dir = _skein_paths.daemon_log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            out_f = open(log_dir / "daemon.out", "ab", buffering=0)
+            err_f = open(log_dir / "daemon.err", "ab", buffering=0)
+            os.dup2(out_f.fileno(), _sys.stdout.fileno())
+            os.dup2(err_f.fileno(), _sys.stderr.fileno())
+        except (OSError, ValueError):
+            # Headless on a platform where dup2 of fd 1/2 doesn't work
+            # (e.g. embedded interpreter). Continue without redirect.
+            pass
 
     console.print(
         f"[bold green]▶ Starting Skein daemon[/bold green] "
@@ -2696,13 +2670,16 @@ def doctor(show_perf: bool, do_clean: bool, do_reingest: bool) -> None:
         elif ep == "fastembed":
             ui.step("Embedding provider (fastembed, dim=384)", state="ok",
                     detail="local · BAAI/bge-small-en-v1.5 · no API key needed")
-        elif ep in ("gemini", "openai"):
-            key_var = "GEMINI_API_KEY" if ep == "gemini" else "OPENAI_API_KEY"
-            has_key = bool(os.environ.get(key_var))
-            check(f"Embedding provider ({ep}, cloud)", has_key,
-                  f"{key_var} not set in environment",
-                  f"export {key_var}=… in your shell rc, or "
+        elif ep == "openai":
+            has_key = bool(os.environ.get("OPENAI_API_KEY"))
+            check("Embedding provider (openai, cloud)", has_key,
+                  "OPENAI_API_KEY not set in environment",
+                  "export OPENAI_API_KEY=… in your shell rc, or "
                   "`skein config set embedding_provider fastembed` for the local default")
+        else:
+            check("Embedding provider", False,
+                  f"unknown provider '{ep}'",
+                  "Valid: fastembed, openai, bm25, hash")
 
         # Iter 23: warn if stored embeddings have a different dimension than
         # the active provider — recall results would be unreliable until
@@ -3767,7 +3744,7 @@ def config_show() -> None:
 @click.argument("key")
 @click.argument("value")
 def config_set(key: str, value: str) -> None:
-    """Set a config key. Example: skein config set embedding_provider gemini"""
+    """Set a config key. Example: skein config set embedding_provider fastembed"""
     from .config import SkeinConfig, _default_config_path, load_config
 
     cfg = load_config()

@@ -62,7 +62,9 @@ async def lifespan(app: FastAPI):
     set_storage(storage)
     logger.info("Storage initialised at %s", cfg.db_path)
 
-    # Initialise embedding provider
+    # Iter 28: provider construction is now cheap — FastembedProvider's
+    # __init__ no longer loads the ONNX model; that happens on first embed
+    # call. So we can still build it eagerly here without blocking /health.
     provider = get_provider(cfg.embedding_provider)
     set_provider(provider)
     logger.info("Embedding provider: %s (dim=%d)", cfg.embedding_provider, provider.dimension)
@@ -84,7 +86,6 @@ async def lifespan(app: FastAPI):
                 stored_dim, cfg.embedding_provider, provider_dim,
             )
     except Exception:
-        # peek failure must not block daemon startup
         logger.debug("Embedding dimension peek failed; skipping mismatch check", exc_info=True)
 
     # Note: filesystem watchers do *not* run inside the daemon process.
@@ -103,6 +104,12 @@ async def lifespan(app: FastAPI):
     ))
     task4 = asyncio.create_task(_inbox_auto_approve_loop(
         cfg.db_path, cfg, provider, cfg.inbox_auto_approve_interval,
+    ))
+    # Iter 28 boot-perf: the code/docs scanners used to run synchronously
+    # from `skein up`, costing 2–4 s every warm boot. Daemon-side sweep
+    # owns them now so the CLI can return as soon as the daemon is healthy.
+    task5 = asyncio.create_task(_passive_scan_loop(
+        cfg.db_path, cfg, provider, cfg.passive_scan_interval,
     ))
 
     # Common setup for the two passive watchers — both need their own SQLite
@@ -161,6 +168,7 @@ async def lifespan(app: FastAPI):
     task2.cancel()
     task3.cancel()
     task4.cancel()
+    task5.cancel()
     for w in (git_watcher, transcript_watcher):
         if w is not None:
             try:
@@ -385,3 +393,72 @@ async def _inbox_auto_approve_loop(db_path: str, cfg, provider, interval: int) -
             logger.warning("inbox auto-approve loop error: %s", e)
         finally:
             sweep_storage.close()
+
+
+async def _passive_scan_loop(db_path: str, cfg, provider, interval: int) -> None:
+    """Iter 28 boot-perf: own the package-manifest scan + docs scan on the
+    daemon side so ``skein up`` doesn't pay the cost on every invocation.
+
+    Walks every registered project's `scan_project()` (package.json,
+    pyproject.toml, Dockerfile, CI, etc.) and `scan_docs()` (README,
+    CHANGELOG, ADRs) outputs through ``promote_scanned_facts``. The
+    `_agents_md_sync_loop` then picks up any new facts and regenerates
+    AGENTS.md within its 60-s interval. Net behaviour vs. the old CLI
+    blocks is identical apart from the up-to-``interval``-seconds delay
+    on freshly added projects — by then the user is already coding.
+
+    First iteration sleeps ``min(interval, 5)`` s so daemon boot is
+    never blocked by a scanner walk. Sweep failures are logged and the
+    loop continues — never wedges the daemon.
+    """
+    from pathlib import Path
+    from .auth import token_prefix as _tp
+    from .docs_watcher import scan_docs
+    from .models import IdentityCreate
+    from .passive import promote_scanned_facts
+    from .projects import list_projects
+    from .scanner import scan_project
+
+    # Stagger the first sweep so the daemon's first /health probe is fast.
+    await asyncio.sleep(min(interval, 5))
+    while True:
+        try:
+            projects = list_projects()
+        except Exception as e:
+            logger.warning("passive scan: list_projects failed: %s", e)
+            projects = []
+        for project in projects:
+            try:
+                root = Path(project.root)
+                if not root.is_dir():
+                    continue
+                sweep_storage = Storage(db_path)
+                try:
+                    scope_obj = sweep_storage.get_scope(project.scope)
+                    if not scope_obj:
+                        continue
+                    owner = sweep_storage.get_or_create_identity(IdentityCreate(
+                        handle=f"user:{_tp(cfg.bearer_token)}",
+                        type="user", name="local-user",
+                    ))
+                    facts = scan_project(root)
+                    if facts:
+                        promote_scanned_facts(
+                            facts, storage=sweep_storage, provider=provider,
+                            scope_id=scope_obj.id, owner_id=owner.id,
+                            source_tool="code-scanner",
+                        )
+                    doc_facts = scan_docs(root)
+                    if doc_facts:
+                        promote_scanned_facts(
+                            doc_facts, storage=sweep_storage, provider=provider,
+                            scope_id=scope_obj.id, owner_id=owner.id,
+                            source_tool="docs-scanner",
+                        )
+                finally:
+                    sweep_storage.close()
+            except Exception as e:
+                logger.warning(
+                    "passive scan failed for %s: %s", project.scope, e,
+                )
+        await asyncio.sleep(interval)

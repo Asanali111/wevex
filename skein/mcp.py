@@ -195,9 +195,12 @@ async def _dispatch(method: str, params: dict[str, Any], request: Request) -> An
         return {"prompts": _PROMPTS}
 
     if method == "prompts/get":
+        import asyncio
         name = params.get("name")
         args = params.get("arguments") or {}
-        return _get_prompt(name, args, storage)
+        # _get_prompt runs a sync recall (with embedding) — offload to
+        # a worker thread to keep the asyncio event loop responsive.
+        return await asyncio.to_thread(_get_prompt, name, args, storage)
 
     raise McpError(-32601, f"Method not found: {method}")
 
@@ -728,6 +731,7 @@ async def _call_tool(
     provider: Any,
     request: Request,
 ) -> dict:
+    import asyncio
     from .auth import token_prefix
     from .config import get_config
     from .models import (
@@ -825,7 +829,11 @@ async def _call_tool(
             territory=args.get("territory"),
             limit=args.get("limit", 10),
         )
-        response = do_recall(req, storage, provider)
+        # Offload to a worker thread — do_recall's embedding call + SQLite
+        # queries are synchronous and would otherwise block the asyncio
+        # event loop (and /health) during fastembed's first-call warm-up
+        # or any slow embed/search.
+        response = await asyncio.to_thread(do_recall, req, storage, provider)
         log_event("recall", scope=args["scope"], query=args["query"][:120], hits=response.total)
         if not response.results:
             return _tool_text("No relevant context found.")
@@ -889,7 +897,7 @@ async def _call_tool(
         from .models import CommitCreate
         embedding_bytes = None
         try:
-            vec = provider.embed_one(args["content"])
+            vec = await asyncio.to_thread(provider.embed_one, args["content"])
             embedding_bytes = vec_to_bytes(vec)
         except Exception:
             pass
@@ -925,7 +933,7 @@ async def _call_tool(
         from .models import CommitCreate
         embedding_bytes = None
         try:
-            vec = provider.embed_one(full_content)
+            vec = await asyncio.to_thread(provider.embed_one, full_content)
             embedding_bytes = vec_to_bytes(vec)
         except Exception:
             pass
@@ -1018,7 +1026,7 @@ async def _call_tool(
 
         embedding_bytes = None
         try:
-            vec = provider.embed_one(new_content)
+            vec = await asyncio.to_thread(provider.embed_one, new_content)
             embedding_bytes = vec_to_bytes(vec)
         except Exception:
             pass
@@ -1093,7 +1101,9 @@ async def _call_tool(
             source_root=args.get("source_root"),
             limit=args.get("limit", 8),
         )
-        response = search_chunks(req, storage, provider)
+        # Offloaded for the same reason as do_recall above — keeps the
+        # event loop responsive to /health during fastembed warm-up.
+        response = await asyncio.to_thread(search_chunks, req, storage, provider)
         if not response.results:
             return _tool_text(
                 f"No code chunks found for {response.query!r}.\n"
@@ -1186,7 +1196,7 @@ async def _call_tool(
             from .models import RecallRequest
             from .retrieval import recall as do_recall
             req = RecallRequest(query=query, scope=scope_handle, limit=limit)
-            resp = do_recall(req, storage, provider)
+            resp = await asyncio.to_thread(do_recall, req, storage, provider)
             candidates = [r.fragment for r in resp.results[:limit]]
         if not candidates:
             return _tool_text(
