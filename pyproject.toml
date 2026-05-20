@@ -24,6 +24,12 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  # Iter 28 Windows port: daemon backend gains a Scheduled Task option so
+  # `skein up` produces a logon-persistent service on Windows the same way
+  # it produces a launchd agent on macOS / systemd-user unit on Linux.
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
 ]
 
 dependencies = [
@@ -44,11 +50,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Cloud embedding providers — opt-in. Skein defaults to the local fastembed
+# Cloud embedding provider — opt-in. Skein defaults to the local fastembed
 # provider so `pip install skein && skein up` is zero-config.
-gemini = ["google-genai>=0.3"]
+# (The Gemini embedding provider was removed in iter 27; see
+# skein/embeddings.py module docstring. The Gemini CLI as an LLM client
+# is unrelated and remains fully supported.)
 openai = ["openai>=1.30"]
-fastembed = ["fastembed>=0.3.0"]  # alias for explicit selection; already in base
 test = [
   "pytest>=7.4",
   "pytest-asyncio>=0.23",

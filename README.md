@@ -62,7 +62,27 @@ pip3 install skn          # macOS users where `pip` points at Python 2
 py -m pip install skn     # Windows
 ```
 
-After `skein up`, every connected LLM (Claude Code, Cursor, Codex, Gemini CLI, Antigravity, Copilot, VS Code, opencode) automatically has shared context for the project. The daemon runs as a background service that survives terminal close and reboots (launchd on macOS, systemd-user on Linux, nohup elsewhere).
+After `skein up`, every connected LLM (Claude Code, Cursor, Codex, Gemini CLI, Antigravity, Copilot, VS Code, opencode) automatically has shared context for the project. The daemon runs as a background service that survives terminal close **and reboots** on all three OSes — launchd agent on macOS, systemd-user unit on Linux, Scheduled Task (logon trigger, restart-on-failure) on Windows.
+
+### Windows notes
+
+`skein up` on Windows registers a Scheduled Task named `Skein\Daemon` at the
+current user's logon — no admin elevation needed. The XML definition pins
+`RestartOnFailure` to the same 3-retry/1-minute interval the launchd
+`KeepAlive` and systemd `Restart=always` paths use, so reboot persistence
+and crash recovery match the POSIX backends. State lives under
+`%APPDATA%\skein\` (the same set of files macOS/Linux keep in
+`~/.config/skein/`). To see or remove the task by hand:
+
+```powershell
+schtasks /Query  /TN "Skein\Daemon" /V
+schtasks /Delete /TN "Skein\Daemon" /F   # equivalent to `skein down`
+```
+
+If `schtasks.exe` is missing (Server Core, nano-server, stripped containers)
+the daemon falls back to a `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`
+nohup-style spawn — survives terminal close but not reboot. Run `skein up`
+again on first login in that case.
 
 `skein up` is **idempotent** — safe to run repeatedly. It does:
 
@@ -378,11 +398,11 @@ Config file: `~/.config/skein/config.json` (created by `skein init`).
 | `port` | 8765 | `SKEIN_PORT` |
 | `host` | 127.0.0.1 | `SKEIN_HOST` |
 | `db_path` | `~/.config/skein/skein.db` | `SKEIN_DB_PATH` |
-| `embedding_provider` | `bm25` (auto-detects `gemini` / `openai` if their API key is set) | `SKEIN_EMBEDDING_PROVIDER` |
+| `embedding_provider` | `fastembed` | `SKEIN_EMBEDDING_PROVIDER` |
 | `bearer_token` | (generated) | `SKEIN_BEARER_TOKEN` |
 | `default_scope` | `project:default` | `SKEIN_DEFAULT_SCOPE` |
 
-Embedding providers: `hash` (offline), `gemini` (requires `GEMINI_API_KEY`), `openai` (requires `OPENAI_API_KEY`).
+Embedding providers: `fastembed` (local BAAI/bge-small-en-v1.5, 384-dim, default — no API key, ~130 MB one-time model download), `openai` (cloud, requires `OPENAI_API_KEY`), `bm25` (FTS5-only, no vector ranking), `hash` (tests-only).
 
 ---
 
@@ -414,12 +434,23 @@ skein scope create project:api-service --parent team:backend
 
 ## Embedding quality
 
-The `hash` provider (default) is **not semantically meaningful** — it exists so Skein boots with zero API keys and tests run offline. Retrieval still works via BM25 (keyword). For semantic retrieval, configure Gemini:
+The default `fastembed` provider runs `BAAI/bge-small-en-v1.5` locally (384-dim, ONNX). First daemon startup downloads ~130 MB of model weights to `~/.cache/fastembed/`; after that every embedding is a sub-15 ms CPU call with no API key and no rate limits. Recall is hybrid: BM25 (FTS5) fused with vector cosine via Reciprocal Rank Fusion.
+
+If you want OpenAI's `text-embedding-3-small` instead:
 
 ```bash
-export GEMINI_API_KEY=your-key
-skein init --embedding-provider gemini
+export OPENAI_API_KEY=your-key
+pip install 'skn[openai]'
+skein config set embedding_provider openai
 ```
+
+If you can't or don't want to install fastembed, fall back to keyword-only:
+
+```bash
+skein config set embedding_provider bm25
+```
+
+> The previous `gemini` embedding provider was removed in iter 27 — its rate limits wedged the daemon's event loop. Existing configs naming `gemini` are silently aliased to `fastembed` on next load. The **Gemini CLI** as an LLM client is unaffected and still a fully-supported sync target.
 
 ---
 

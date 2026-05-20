@@ -23,10 +23,46 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("skein.clients")
+
+
+def _is_windows() -> bool:
+    return sys.platform.startswith("win") or os.name == "nt"
+
+
+def _is_macos() -> bool:
+    return sys.platform == "darwin"
+
+
+def _appdata_dir(name: str) -> Optional[Path]:
+    """Return ``%APPDATA%\\name`` on Windows, else None.
+
+    Used by clients (opencode, …) that follow XDG on POSIX but live under
+    Roaming AppData on Windows.
+    """
+    if not _is_windows():
+        return None
+    appdata = os.environ.get("APPDATA")
+    base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    return base / name
+
+
+def _localappdata_dir(name: str) -> Optional[Path]:
+    """Return ``%LOCALAPPDATA%\\name`` on Windows, else None.
+
+    Most Windows GUI apps install themselves under LocalAppData (Cursor,
+    VS Code's user install). Detection-only — not used as a config target.
+    """
+    if not _is_windows():
+        return None
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / name
+    return Path.home() / "AppData" / "Local" / name
 
 
 # ---------------------------------------------------------------------------
@@ -178,12 +214,19 @@ class CursorClient(BaseClient):
     description = "AI-first IDE (Cursor.app)"
 
     def detect(self) -> tuple[bool, str]:
+        candidates = [Path.home() / ".cursor"]
+        # macOS — Cursor.app bundle in /Applications. Always-present
+        # on POSIX, must not be probed on Windows where Path("/Applications/…")
+        # resolves to "C:\Applications\…" and silently always-misses.
+        if _is_macos():
+            candidates.append(Path("/Applications/Cursor.app"))
+        # Windows — Cursor's user install lands in %LOCALAPPDATA%\Programs\cursor.
+        win_install = _localappdata_dir("Programs") and _localappdata_dir("Programs") / "cursor"
+        if win_install is not None:
+            candidates.append(win_install)
         return _detect_any(
             _detect_binary("cursor"),
-            _detect_path(
-                Path.home() / ".cursor",
-                Path("/Applications/Cursor.app"),
-            ),
+            _detect_path(*candidates),
         )
 
     def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
@@ -216,12 +259,22 @@ class VsCodeClient(BaseClient):
     description = "Visual Studio Code with GitHub Copilot Chat"
 
     def detect(self) -> tuple[bool, str]:
+        candidates = [Path.home() / ".vscode"]
+        if _is_macos():
+            candidates.append(Path("/Applications/Visual Studio Code.app"))
+        # Windows — system install at %ProgramFiles%\Microsoft VS Code,
+        # user install at %LOCALAPPDATA%\Programs\Microsoft VS Code.
+        if _is_windows():
+            for base_env in ("ProgramFiles", "ProgramFiles(x86)"):
+                base = os.environ.get(base_env)
+                if base:
+                    candidates.append(Path(base) / "Microsoft VS Code")
+            user_install = _localappdata_dir("Programs")
+            if user_install is not None:
+                candidates.append(user_install / "Microsoft VS Code")
         return _detect_any(
             _detect_binary("code"),
-            _detect_path(
-                Path.home() / ".vscode",
-                Path("/Applications/Visual Studio Code.app"),
-            ),
+            _detect_path(*candidates),
         )
 
     def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
@@ -343,6 +396,19 @@ class AntigravityClient(BaseClient):
 # opencode
 # ---------------------------------------------------------------------------
 
+def _opencode_config_dir() -> Path:
+    """opencode's config dir is XDG on POSIX, %APPDATA%\\opencode on Windows.
+
+    Mirrors the upstream opencode behaviour — writing to ``~/.config/opencode``
+    on Windows would land in a folder opencode doesn't read, so the daemon
+    would still work but Skein wouldn't actually be wired up.
+    """
+    win = _appdata_dir("opencode")
+    if win is not None:
+        return win
+    return Path.home() / ".config" / "opencode"
+
+
 class OpenCodeClient(BaseClient):
     id = "opencode"
     display_name = "opencode"
@@ -351,11 +417,11 @@ class OpenCodeClient(BaseClient):
     def detect(self) -> tuple[bool, str]:
         return _detect_any(
             _detect_binary("opencode"),
-            _detect_path(Path.home() / ".config" / "opencode"),
+            _detect_path(_opencode_config_dir()),
         )
 
     def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
-        oc_dir = Path.home() / ".config" / "opencode"
+        oc_dir = _opencode_config_dir()
         oc_dir.mkdir(parents=True, exist_ok=True)
         path = oc_dir / "config.json"
         data = _read_json(path)
@@ -374,9 +440,7 @@ class OpenCodeClient(BaseClient):
         return _remove_skein_from_json(
             recorded_paths or [],
             ["mcp", "servers"],
-            default_paths=[
-                Path.home() / ".config" / "opencode" / "config.json",
-            ],
+            default_paths=[_opencode_config_dir() / "config.json"],
         )
 
 
