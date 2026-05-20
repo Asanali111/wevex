@@ -690,6 +690,26 @@ class Storage:
             return None
         return len(row[0]) // 4
 
+    def recent_writes_by_tool(self, hours: int = 24) -> dict[str, int]:
+        """Iter 29 day-one: return ``{created_by_tool: count}`` for non-stale
+        fragments written in the last ``hours``.
+
+        Powers the cross-LLM activity line in the MCP ``initialize.instructions``
+        greeting — the unique value prop ("cursor stored 3 decisions today, the
+        next session you open in cursor will see your decisions") is most
+        compelling when the LLM sees concrete numbers, not generic copy.
+        """
+        rows = self._conn.execute(
+            """SELECT COALESCE(created_by_tool, 'unknown') AS tool, COUNT(*) AS c
+               FROM fragments
+               WHERE is_stale = 0
+                 AND (expires_at IS NULL OR expires_at > datetime('now'))
+                 AND created_at >= datetime('now', ?)
+               GROUP BY tool ORDER BY c DESC""",
+            (f"-{int(hours)} hours",),
+        ).fetchall()
+        return {row["tool"]: int(row["c"]) for row in rows}
+
     def count_fragments_in_scope(self, scope_id: str, include_stale: bool = False) -> int:
         """Cheap existence check used by hot-path hooks to early-exit when the
         scope has no fragments — avoids the embedding+BM25+vector roundtrip."""

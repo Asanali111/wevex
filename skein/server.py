@@ -69,6 +69,23 @@ async def lifespan(app: FastAPI):
     set_provider(provider)
     logger.info("Embedding provider: %s (dim=%d)", cfg.embedding_provider, provider.dimension)
 
+    # Iter 29 day-one: fire a throwaway embed in a worker thread so the
+    # ONNX runtime (and the model itself, if first launch on this machine)
+    # is hot by the time the first MCP recall arrives. /health stays
+    # responsive because this is `create_task` + `to_thread` — pure
+    # background work. Without this, a fresh user's first `recall` call
+    # ate 7–8 s of ONNX cold-start and calibrated their trust as
+    # "Skein is slow." Failures here must NOT crash the daemon; we log
+    # them and let lazy-load handle the retry on the first real call.
+    async def _warm_embedding_provider() -> None:
+        try:
+            await asyncio.to_thread(provider.embed_one, "warmup")
+            logger.info("Embedding provider warm.")
+        except Exception:
+            logger.warning("Embedding warmup failed; first recall will lazy-load.",
+                           exc_info=True)
+    warmup_task = asyncio.create_task(_warm_embedding_provider())
+
     # Iter 23: warn loudly if the stored embeddings' dimension doesn't match
     # the active provider. Cosine similarity between a 384-dim query and a
     # 768-dim stored vector is undefined — recall results would be garbage
@@ -169,6 +186,7 @@ async def lifespan(app: FastAPI):
     task3.cancel()
     task4.cancel()
     task5.cancel()
+    warmup_task.cancel()
     for w in (git_watcher, transcript_watcher):
         if w is not None:
             try:
@@ -419,8 +437,11 @@ async def _passive_scan_loop(db_path: str, cfg, provider, interval: int) -> None
     from .projects import list_projects
     from .scanner import scan_project
 
-    # Stagger the first sweep so the daemon's first /health probe is fast.
-    await asyncio.sleep(min(interval, 5))
+    # Iter 29 day-one: 1 s stagger is enough to let uvicorn bind the port
+    # and /health become live; previously 5 s, which meant fresh users got
+    # an empty `recall` for 5+ s after `skein up` returned. Cold-start
+    # corpus (docs scan, scanner facts) lands inside the first second now.
+    await asyncio.sleep(min(interval, 1))
     while True:
         try:
             projects = list_projects()

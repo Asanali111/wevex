@@ -160,7 +160,7 @@ async def _dispatch(method: str, params: dict[str, Any], request: Request) -> An
         # every subsequent tool call attribute its writes to the originating
         # tool without the user managing per-client tokens.
         _remember_initiating_client(params, request, storage)
-        return _handle_initialize(params)
+        return _handle_initialize(params, storage)
 
     if method == "notifications/initialized":
         return {}  # ack
@@ -268,7 +268,7 @@ def _client_name_for_request(request: Request, storage: Any) -> str:
         return "unknown"
 
 
-def _handle_initialize(params: dict) -> dict:
+def _handle_initialize(params: dict, storage: Any) -> dict:
     return {
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "serverInfo": {"name": "skein", "version": "0.1.0"},
@@ -281,8 +281,66 @@ def _handle_initialize(params: dict) -> dict:
         # SHOULD include in its system prompt. We use it to auto-inject the
         # recall-first guidance — avoids the AI consumer needing to be told
         # by the user/AGENTS.md to call `recall` first on every turn.
-        "instructions": _RECALL_FIRST_TEXT,
+        # Iter 29 day-one: the text is now dynamic — appends a "this project"
+        # block with fragment count + last-24h cross-LLM activity. Empty
+        # stores get a starter prompt instead of a passive welcome.
+        "instructions": _build_initialize_instructions(storage),
     }
+
+
+def _build_initialize_instructions(storage: Any) -> str:
+    """Render the dynamic onboarding greeting that ships in the MCP
+    ``initialize.instructions`` field on every connection.
+
+    Three blocks: the static recall-first rules, then per-DB state
+    (fragment count + last-24h cross-LLM activity), then a one-line
+    "what to try first" tailored to whether the store is empty or full.
+    """
+    try:
+        stats = storage.stats()
+        fragment_count = int(stats.get("fragments", 0))
+    except Exception:
+        fragment_count = 0
+    try:
+        activity = storage.recent_writes_by_tool(hours=24)
+    except Exception:
+        activity = {}
+
+    lines: list[str] = [_RECALL_FIRST_TEXT.rstrip(), ""]
+
+    if fragment_count == 0:
+        # Empty store — fresh install / never-used DB. Don't be cheerful;
+        # be specific about what's coming and what the LLM can do now.
+        lines.extend([
+            "Project state: no fragments stored yet. Cold-start ingest is "
+            "queued — recent git commits, README claims, and dep manifests "
+            "will appear in `recall` within ~10s. In the meantime, every "
+            "`remember` / `note_decision` call you make will be the first "
+            "thing future sessions see.",
+        ])
+    else:
+        lines.append(f"Project state: {fragment_count} fragments stored.")
+        if activity:
+            # Limit to top 4 tools so the system prompt stays tight.
+            top = sorted(activity.items(), key=lambda x: -x[1])[:4]
+            parts = [f"{tool} ({count})" for tool, count in top]
+            lines.append(
+                f"Cross-tool activity (last 24h): {', '.join(parts)}."
+            )
+        else:
+            lines.append(
+                "No writes in the last 24 h — Skein is quiet. Connecting "
+                "another LLM (`skein connect`) compounds the value: every "
+                "decision you record here surfaces in `cursor` / `codex` "
+                "sessions on the same project."
+            )
+
+    lines.extend([
+        "",
+        "Quick start: call `project_briefing` for the dashboard, or "
+        "`recall(\"<your task>\")` to load relevant context.",
+    ])
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -835,8 +893,38 @@ async def _call_tool(
         # or any slow embed/search.
         response = await asyncio.to_thread(do_recall, req, storage, provider)
         log_event("recall", scope=args["scope"], query=args["query"][:120], hits=response.total)
-        if not response.results:
-            return _tool_text("No relevant context found.")
+        # Iter 29 day-one: empty-OR-low-quality recall offers a write
+        # suggestion. With hybrid BM25+vector+RRF, true `[]` results are
+        # rare — but a top-quality of "none" means Skein has nothing
+        # high-signal for the query. Both cases deserve the same nudge.
+        is_low_signal = (
+            not response.results
+            or response.results[0].quality == "none"
+        )
+        if is_low_signal:
+            query = args.get("query", "")
+            # Filters: real-question shape (≥10 chars + whitespace). Skips
+            # one-word "test" / "foo" probes that don't make good writes.
+            if len(query) >= 10 and " " in query.strip():
+                escaped = query.replace('"', '\\"')[:120]
+                preface = (
+                    "Found 0 fragments. "
+                    if not response.results
+                    else f"Found {response.total} fragments but the top "
+                         f"match is low-signal (quality=none). "
+                )
+                suggestion = (
+                    f"{preface}"
+                    f"If you have context for {query!r}, call "
+                    f"`remember(content=\"<your answer or decision>\", "
+                    f"type=\"fact\", scope=\"{args['scope']}\")` so the "
+                    f"next session (or another LLM working on this project) "
+                    f"sees it. Suggested writeup query: \"{escaped}\"."
+                )
+                return _tool_text(suggestion)
+            if not response.results:
+                return _tool_text("No relevant context found.")
+            # Low-signal but unusable query — fall through to normal rendering.
         # iter 24: lead with the quality bucket — it's the only signal callers
         # can route on without knowing what RRF/BM25/cosine look like.
         top_quality = response.results[0].quality
