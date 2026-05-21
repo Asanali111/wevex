@@ -2561,6 +2561,81 @@ def _doctor_reingest() -> None:
     )
 
 
+def _doctor_reindex_embeddings() -> None:
+    """Iter 32: re-embed every fragment under the active provider.
+
+    Legacy 768-dim fragments from the gemini-era return cos=0 from vector
+    search under the new fastembed 384-dim provider (they only reach
+    `recall` via BM25). This walks every non-stale fragment, recomputes the
+    embedding, and writes it back. Runs against the local DB directly — no
+    daemon roundtrip — so it's safe under launchd's TCC restrictions.
+    """
+    from . import ui
+    from .config import get_config
+    from .embeddings import bytes_to_vec, get_provider, vec_to_bytes
+    from .storage import Storage
+
+    cfg = get_config()
+    storage = Storage(cfg.db_path)
+    try:
+        provider = get_provider(cfg.embedding_provider)
+        target_dim = getattr(provider, "dimension", 0)
+        ui.section(f"Reindex embeddings → {cfg.embedding_provider} (dim={target_dim})")
+        ui.blank()
+
+        rows = storage._conn.execute(
+            "SELECT id, content, embedding FROM fragments "
+            "WHERE is_stale = 0 AND content IS NOT NULL AND content != ''",
+        ).fetchall()
+        total = len(rows)
+        if total == 0:
+            ui.step("Nothing to reindex", state="ok", detail="0 live fragments.")
+            return
+
+        ui.step(f"Reindexing {total} fragments", state="info")
+        reindexed = 0
+        already_ok = 0
+        failed = 0
+        mismatched = 0
+        for row in rows:
+            existing_dim = None
+            if row["embedding"]:
+                try:
+                    existing_dim = len(bytes_to_vec(row["embedding"]))
+                except Exception:
+                    existing_dim = None
+            if existing_dim == target_dim and existing_dim is not None:
+                already_ok += 1
+                continue
+            if existing_dim is not None and existing_dim != target_dim:
+                mismatched += 1
+            try:
+                vec = provider.embed_one(row["content"])
+                blob = vec_to_bytes(vec)
+                storage._conn.execute(
+                    "UPDATE fragments SET embedding = ? WHERE id = ?",
+                    (blob, row["id"]),
+                )
+                reindexed += 1
+            except Exception as e:
+                failed += 1
+                ui.hint(f"Failed {row['id'][:8]}…: {e}")
+        storage._conn.commit()
+        ui.blank()
+        ui.step(
+            f"Reindexed {reindexed}", state="ok",
+            detail=f"already aligned: {already_ok}, dimension-mismatched: "
+                   f"{mismatched}, failed: {failed}",
+        )
+        ui.hint("Restart the daemon (skein restart) so cached query "
+                "embeddings flush.")
+    finally:
+        try:
+            storage.close()
+        except Exception:
+            pass
+
+
 @main.command()
 @click.option("--perf", "show_perf", is_flag=True, default=False,
               help="Also measure recall/search latency and chunk-index stats.")
@@ -2570,7 +2645,13 @@ def _doctor_reingest() -> None:
 @click.option("--reingest", "do_reingest", is_flag=True, default=False,
               help="Re-ingest the codebase at the current working directory. "
                    "Replaces `skein ingest`.")
-def doctor(show_perf: bool, do_clean: bool, do_reingest: bool) -> None:
+@click.option("--reindex-embeddings", "do_reindex_embeddings", is_flag=True,
+              default=False,
+              help="Re-embed every fragment under the active provider — "
+                   "fixes legacy fragments that return cos=0 after an "
+                   "embedding-provider change.")
+def doctor(show_perf: bool, do_clean: bool, do_reingest: bool,
+           do_reindex_embeddings: bool) -> None:
     """Deep diagnostic: daemon, scopes, fragments, chunks, value distribution.
 
     Subsumes (per ADR-002) the old `daemon status`, `daemon logs`, `events`
@@ -2596,6 +2677,9 @@ def doctor(show_perf: bool, do_clean: bool, do_reingest: bool) -> None:
         return
     if do_reingest:
         _doctor_reingest()
+        return
+    if do_reindex_embeddings:
+        _doctor_reindex_embeddings()
         return
     import shutil
     from . import ui
