@@ -206,7 +206,25 @@ class FastembedProvider(EmbeddingProvider):
     def _ensure_model(self):
         if self._model is None:
             from fastembed import TextEmbedding  # type: ignore
-            self._model = TextEmbedding(model_name=self.model)
+            # Iter 30: pin the cache dir to ~/.cache/fastembed so macOS's
+            # /var/folders/* temp cleanup (purges files unused for >3 days)
+            # can't silently delete the ONNX weights. The previous default
+            # landed under tempfile.gettempdir() = /var/folders/<hash>/T/
+            # and the model got reaped between sessions, then every embed
+            # call silently failed with "File doesn't exist" and the
+            # provider quietly fell back to BM25-only — making recall
+            # return zero high-signal matches and the iter-29 empty-recall
+            # fallback fire instead of real semantic results.
+            import os
+            from pathlib import Path
+            cache_dir = Path(
+                os.environ.get("SKEIN_FASTEMBED_CACHE")
+                or (Path.home() / ".cache" / "fastembed")
+            )
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            self._model = TextEmbedding(
+                model_name=self.model, cache_dir=str(cache_dir),
+            )
         return self._model
 
     def embed(self, texts: List[str]) -> List[List[float]]:

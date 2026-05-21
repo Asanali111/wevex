@@ -907,15 +907,36 @@ async def _call_tool(
             # one-word "test" / "foo" probes that don't make good writes.
             if len(query) >= 10 and " " in query.strip():
                 escaped = query.replace('"', '\\"')[:120]
-                preface = (
-                    "Found 0 fragments. "
-                    if not response.results
-                    else f"Found {response.total} fragments but the top "
-                         f"match is low-signal (quality=none). "
+                # Iter 30 wording fix: "Found 0 fragments" reads as "the
+                # store has 0 fragments total" — misleading users into
+                # thinking Skein is empty when actually the store has
+                # plenty and just nothing matches this specific query.
+                # Always state the total so the failure mode is unambiguous.
+                try:
+                    total_in_scope = storage.count_fragments_in_scope(
+                        response.scope if hasattr(response, "scope") else args["scope"],
+                    )
+                except Exception:
+                    total_in_scope = None
+                total_note = (
+                    f" (Skein has {total_in_scope} fragments in this scope, "
+                    "none of them semantically related to your query.)"
+                    if total_in_scope is not None and total_in_scope > 0
+                    else ""
                 )
+                if not response.results:
+                    preface = (
+                        f"No fragment in Skein matched {query!r}.{total_note} "
+                    )
+                else:
+                    preface = (
+                        f"No high-signal match for {query!r} — the top of "
+                        f"{response.total} candidate fragments scored as "
+                        f"low-signal (quality=none).{total_note} "
+                    )
                 suggestion = (
                     f"{preface}"
-                    f"If you have context for {query!r}, call "
+                    f"If you have context for this, call "
                     f"`remember(content=\"<your answer or decision>\", "
                     f"type=\"fact\", scope=\"{args['scope']}\")` so the "
                     f"next session (or another LLM working on this project) "
