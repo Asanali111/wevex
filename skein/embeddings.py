@@ -184,6 +184,11 @@ class FastembedProvider(EmbeddingProvider):
     # latency (~30–50 ms); a hit collapses that to a dict lookup. 128 keeps
     # memory bounded (~200 KB at 384 float32 per entry).
     _QUERY_CACHE_MAX: int = 128
+    # Iter 31: drop the ONNX runtime after this many seconds of no embed
+    # calls. Keeps daemon RSS low when nobody is actively recalling. Cold
+    # reload on the next call is ~200 ms (already in tempfile-resistant
+    # ~/.cache/fastembed thanks to iter 30). Override via env var.
+    _IDLE_UNLOAD_SECONDS: int = 600
 
     def __init__(self, model_name: Optional[str] = None) -> None:
         if model_name:
@@ -200,6 +205,12 @@ class FastembedProvider(EmbeddingProvider):
                 "Install it: pip install skein[fastembed]  (or: pip install fastembed)"
             ) from e
         self._model = None  # built on first embed call
+        # Iter 31: monotonic timestamp of the most recent embed call.
+        # idle_check_and_unload() uses this to decide when to drop the
+        # ONNX runtime — see _IDLE_UNLOAD_SECONDS.
+        import time
+        self._last_call_at: float = 0.0
+        self._monotonic = time.monotonic
         from collections import OrderedDict
         self._query_cache: "OrderedDict[str, list[float]]" = OrderedDict()
 
@@ -225,7 +236,44 @@ class FastembedProvider(EmbeddingProvider):
             self._model = TextEmbedding(
                 model_name=self.model, cache_dir=str(cache_dir),
             )
+        self._last_call_at = self._monotonic()
         return self._model
+
+    def idle_check_and_unload(self) -> bool:
+        """Drop the ONNX runtime if it's been idle for ``_IDLE_UNLOAD_SECONDS``.
+
+        Returns True iff the model was actually unloaded. Called by a
+        daemon background loop every minute. Reloads on the next embed
+        call (~200 ms cold) — acceptable trade for ~200 MB of resident
+        memory during inactive periods.
+
+        Pinned by the LRU cache: a high-traffic embed_one query that
+        keeps the LRU warm still goes through ``_ensure_model``, so the
+        timer advances on every real call. Idle means truly idle.
+        """
+        import os
+        # Allow override (tests + power users)
+        try:
+            window = float(
+                os.environ.get("SKEIN_FASTEMBED_IDLE_SECONDS",
+                               str(self._IDLE_UNLOAD_SECONDS)),
+            )
+        except (TypeError, ValueError):
+            window = float(self._IDLE_UNLOAD_SECONDS)
+        if self._model is None:
+            return False
+        if self._last_call_at == 0.0:
+            # Loaded but never used? Refuse to unload — usually means a
+            # warmup task is mid-flight on another thread.
+            return False
+        if (self._monotonic() - self._last_call_at) < window:
+            return False
+        logger.info(
+            "FastembedProvider idle for %ds — unloading ONNX runtime to free RAM",
+            int(self._monotonic() - self._last_call_at),
+        )
+        self._model = None
+        return True
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         if not texts:

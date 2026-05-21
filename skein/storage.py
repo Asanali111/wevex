@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -68,12 +69,17 @@ class Storage:
         # 30s grace before we surface "database is locked" — handles the
         # rare moment when the watcher and daemon both try to write.
         c.execute("PRAGMA busy_timeout=30000")
-        # 64 MiB page cache — covers the entire working set for typical
-        # projects (251 chunks ≈ a few MB).
-        c.execute("PRAGMA cache_size=-65536")
-        # 256 MiB memory-mapped read window — lets the kernel cache the DB
-        # without an explicit read syscall on every page.
-        c.execute("PRAGMA mmap_size=268435456")
+        # Iter 31: page cache trimmed 64 MiB → 16 MiB. The single-user
+        # daemon's working set fits in a few MB; the extra 48 MiB was
+        # giving "lightweight" the lie. Negative sign means KiB. Tunable
+        # via SKEIN_SQLITE_CACHE_KB for power users with huge stores.
+        cache_kib = int(os.environ.get("SKEIN_SQLITE_CACHE_KB", "16384"))
+        c.execute(f"PRAGMA cache_size=-{cache_kib}")
+        # Iter 31: mmap window 256 MiB → 64 MiB. Same reasoning —
+        # 256 MiB was sized for a hypothetical multi-gig store; we're
+        # at ~40 MiB today. Tunable via SKEIN_SQLITE_MMAP_MB.
+        mmap_mb = int(os.environ.get("SKEIN_SQLITE_MMAP_MB", "64"))
+        c.execute(f"PRAGMA mmap_size={mmap_mb * 1024 * 1024}")
         # FK enforcement is required for our schema's ON DELETE CASCADEs.
         c.execute("PRAGMA foreign_keys=ON")
         # Spill temp tables to memory rather than disk for the rare
@@ -303,6 +309,15 @@ class Storage:
             ("extraction_method",        "TEXT NOT NULL DEFAULT 'explicit'"),
             ("extraction_confidence",    "REAL"),
             ("value",                    "REAL NOT NULL DEFAULT 0.5"),
+            # Iter 31 — efficiency pass. Three new columns: dedupe_key
+            # lets create_fragment short-circuit identical writes (no
+            # duplicate rows when remember() is called twice with the same
+            # content); recall_hits + last_recalled_at feed the
+            # behavioural-value loop so fragments that actually get used
+            # rise to the top organically.
+            ("dedupe_key",               "TEXT"),
+            ("recall_hits",              "INTEGER NOT NULL DEFAULT 0"),
+            ("last_recalled_at",         "TEXT"),
         ]
         value_just_added = False
         for col_name, col_def in wanted:

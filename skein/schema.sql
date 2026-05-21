@@ -106,6 +106,20 @@ CREATE TABLE IF NOT EXISTS fragments (
   -- 0.5 is the neutral default for fragments created before the column
   -- existed.
   value            REAL NOT NULL DEFAULT 0.5,
+  -- Iter 31 (Q-05 phase 3): behavioural value telemetry. Bumped by a
+  -- single batched UPDATE inside retrieval.recall() when a fragment lands
+  -- in the top-K of a real (non-cached) recall response. A daily
+  -- background loop nudges `value` toward `base + 0.05*log(recall_hits)`
+  -- so fragments that actually get used rise; unused ones fade. Skips
+  -- pinned rows (value==1.0 + metadata.pinned==true).
+  recall_hits      INTEGER NOT NULL DEFAULT 0,
+  last_recalled_at TEXT,
+  -- Iter 31: cheap content-hash dedupe for explicit writes
+  -- (`remember`/`note_decision`). Re-asserting an identical fragment
+  -- bumps its value and refreshes updated_at instead of inserting a
+  -- duplicate row. NULL for passive-extracted fragments (they go
+  -- through inbox auto-approve which has its own dedupe table).
+  dedupe_key       TEXT,
   created_at       TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -120,6 +134,12 @@ CREATE INDEX IF NOT EXISTS idx_fragments_superseded_by ON fragments(superseded_b
 CREATE INDEX IF NOT EXISTS idx_fragments_tool     ON fragments(created_by_tool) WHERE created_by_tool IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_fragments_method   ON fragments(extraction_method);
 CREATE INDEX IF NOT EXISTS idx_fragments_value    ON fragments(value);
+-- Iter 31: dedupe lookup must be O(log n) so the create_fragment
+-- shortcut is cheap. Partial index — only explicit writes get a key.
+CREATE INDEX IF NOT EXISTS idx_fragments_dedupe   ON fragments(dedupe_key) WHERE dedupe_key IS NOT NULL;
+-- Iter 31: behavioural-value decay loop scans the recently-recalled
+-- subset. Partial index keeps it tiny.
+CREATE INDEX IF NOT EXISTS idx_fragments_recalled ON fragments(last_recalled_at) WHERE last_recalled_at IS NOT NULL;
 
 -- FTS5 virtual table for full-text (BM25-like) search
 CREATE VIRTUAL TABLE IF NOT EXISTS fragments_fts
