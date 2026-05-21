@@ -34,6 +34,16 @@ BUDGETS: Dict[str, Dict[str, Tuple[Op, float]]] = {
         "write_p95_ms": ("<=", 100.0),
         "fragments_per_sec": (">=", 20.0),
     },
+    # Iter 31 efficiency pass: snippet rendering at the MCP layer caps
+    # each rendered result around 320 chars (≈80 tokens). This budget
+    # measures the underlying fragment content lengths returned by the
+    # adapter — a smoke that catches regressions where fragments balloon
+    # past the soft 800-char write cap.
+    "recall_token_budget": {
+        "avg_chars_per_result": ("<=", 1000.0),
+        "max_chars_per_result": ("<=", 2000.0),
+        "total_chars":          ("<=", 40000.0),
+    },
 }
 
 

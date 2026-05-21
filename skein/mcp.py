@@ -1230,16 +1230,40 @@ async def _call_tool(
                 f"No code chunks found for {response.query!r}.\n"
                 f"Has the codebase been ingested? Run `skein ingest <path>` first."
             )
-        lines = [f"Found {response.total} code chunks for query: {response.query!r}\n"]
+        # Iter 31: same snippet + quality-banner treatment as `recall`.
+        # Each chunk renders as `file.py:start-end [lang sym] <snippet>`
+        # in the grep-and-Read-replace shape — lead with the location so
+        # the LLM can act on it immediately. Per-line diagnostic chrome
+        # (cos=, quality=) collapsed into one header banner.
+        top_quality = response.results[0].quality
+        top_cos = response.results[0].cosine
+        cos_note = f", top cos={top_cos:.2f}" if top_cos is not None else ""
+        header = (
+            f"{response.total} code chunks for {response.query!r} "
+            f"(top quality={top_quality}{cos_note})"
+        )
+        if top_quality == "none":
+            header += "\n[top match is low-signal — fall back to grep / Read.]"
+        elif top_quality == "low":
+            header += "\n[top match is low quality — verify before relying.]"
+
+        lines = [header, ""]
+        any_truncated = False
         for r in response.results:
             c = r.chunk
             sym = f" {c.symbol_name}" if c.symbol_name else ""
             lang = f" ({c.language})" if c.language else ""
-            cos_note = f" cos={r.cosine:.2f}" if r.cosine is not None else ""
+            snippet, truncated = _snippet(c.content or "", response.query)
+            any_truncated = any_truncated or truncated
             lines.append(
-                f"[{r.rank}] {c.source_path}:{c.line_start}-{c.line_end}{lang}{sym}  "
-                f"quality={r.quality}{cos_note}\n"
-                f"```{c.language or ''}\n{c.content}\n```\n"
+                f"- {c.source_path}:{c.line_start}-{c.line_end}{lang}{sym}\n"
+                f"  {snippet}"
+            )
+        if any_truncated:
+            lines.append("")
+            lines.append(
+                "Snippets shown. Open the file at the indicated lines for "
+                "full context."
             )
         return _tool_text("\n".join(lines))
 

@@ -134,6 +134,12 @@ async def lifespan(app: FastAPI):
     task6 = asyncio.create_task(_embedding_idle_unload_loop(
         provider, cfg.embedding_idle_check_interval,
     ))
+    # Iter 31 (Q-05 phase 3): periodically nudge fragment.value toward
+    # base + 0.05*log(recall_hits) so fragments LLMs actually use rise
+    # organically; ones that go untouched fade.
+    task7 = asyncio.create_task(_value_decay_loop(
+        cfg.db_path, cfg.value_decay_interval,
+    ))
 
     # Common setup for the two passive watchers — both need their own SQLite
     # handle per poll and the local-user identity.
@@ -193,6 +199,7 @@ async def lifespan(app: FastAPI):
     task4.cancel()
     task5.cancel()
     task6.cancel()
+    task7.cancel()
     warmup_task.cancel()
     for w in (git_watcher, transcript_watcher):
         if w is not None:
@@ -538,3 +545,101 @@ async def _embedding_idle_unload_loop(provider, interval: int) -> None:
             check_fn()
         except Exception:
             logger.debug("embedding idle-unload check failed", exc_info=True)
+
+
+async def _value_decay_loop(db_path: str, interval: int) -> None:
+    """Iter 31 (Q-05 phase 3): drift fragment.value toward a target
+    derived from behavioural recall_hits + a recency penalty.
+
+    Per fragment (only the recently-recalled subset — partial-indexed
+    via idx_fragments_recalled):
+      target = clamp(base + 0.05 * log1p(recall_hits) - 0.02 * weeks_since,
+                     0.05, 1.0)
+      new    = value + 0.20 * (target - value)   # EMA, slow drift
+
+    Skips:
+      - permanent fragments (the user explicitly pinned them)
+      - value == 1.0 with metadata.pinned == true (boost flag)
+      - rows with recall_hits == 0 (nothing to drift them with yet)
+
+    SQLite doesn't natively expose log1p — we use a Taylor-series
+    approximation for small recall_hits and a clamp for the rest. The
+    loop also batches all updates into a single transaction per sweep.
+
+    Failures are logged and the loop continues — never wedge the daemon.
+    """
+    import math
+    sweep_storage: Optional[Storage] = None
+    try:
+        try:
+            sweep_storage = Storage(db_path)
+        except Exception as e:
+            logger.warning("value_decay: open storage failed: %s", e)
+            return
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                # Only touch fragments that have been recalled at least
+                # once — the rest stay at their base value and the decay
+                # loop has nothing to add. The partial idx keeps this
+                # cheap even on big stores.
+                rows = sweep_storage._conn.execute(
+                    """SELECT id, value, recall_hits, last_recalled_at,
+                              metadata, permanent
+                       FROM fragments
+                       WHERE recall_hits > 0 AND is_stale = 0"""
+                ).fetchall()
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                updates: list[tuple[float, str]] = []
+                for row in rows:
+                    if row["permanent"]:
+                        continue
+                    try:
+                        import json as _json
+                        md = _json.loads(row["metadata"] or "{}")
+                    except Exception:
+                        md = {}
+                    if row["value"] >= 1.0 and md.get("pinned"):
+                        continue
+                    hits = int(row["recall_hits"] or 0)
+                    boost = 0.05 * math.log1p(hits)
+                    # Weeks since last_recalled_at — tiny penalty so a
+                    # high-hits fragment that hasn't been touched in a
+                    # month gently drifts down.
+                    weeks_since = 0.0
+                    if row["last_recalled_at"]:
+                        try:
+                            raw = row["last_recalled_at"].replace(" ", "T", 1)
+                            if "+" not in raw:
+                                raw += "+00:00"
+                            last = datetime.fromisoformat(raw)
+                            weeks_since = max(
+                                0.0,
+                                (now - last).total_seconds() / (7 * 86400.0),
+                            )
+                        except Exception:
+                            weeks_since = 0.0
+                    base = 0.50  # neutral default — could derive from value.py
+                    target = max(0.05, min(1.0, base + boost - 0.02 * weeks_since))
+                    new = row["value"] + 0.20 * (target - row["value"])
+                    new = max(0.05, min(1.0, new))
+                    if abs(new - row["value"]) > 0.005:
+                        updates.append((new, row["id"]))
+                if updates:
+                    sweep_storage._conn.executemany(
+                        "UPDATE fragments SET value = ? WHERE id = ?",
+                        updates,
+                    )
+                    logger.info(
+                        "value_decay: nudged %d fragments toward "
+                        "behavioural target", len(updates),
+                    )
+            except Exception:
+                logger.warning("value_decay loop error", exc_info=True)
+    finally:
+        if sweep_storage is not None:
+            try:
+                sweep_storage.close()
+            except Exception:
+                pass

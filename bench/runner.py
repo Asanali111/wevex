@@ -133,4 +133,9 @@ def _seed_then_measure_latency(
                            lambda: measure_recall_latency(adapter, scope=scope)))
     out.append(_run_safely("search_latency", "latency",
                            lambda: measure_search_latency(adapter, scope=scope)))
+    # Iter 31: token-budget scenario — regression guard against future
+    # changes that re-bloat the recall payload.
+    from .scenarios.token_budget import measure_recall_token_budget
+    out.append(_run_safely("recall_token_budget", "efficiency",
+                           lambda: measure_recall_token_budget(adapter, scope=scope)))
     return out

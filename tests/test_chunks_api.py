@@ -174,7 +174,12 @@ class TestSearchCodeMCP:
         assert resp.status_code == 200, resp.text
         data = resp.json()
         text = data["result"]["content"][0]["text"]
-        assert "Found" in text
+        # Iter 31: search_code's response shape changed from "Found N
+        # code chunks for X" to "N code chunks for X (top quality=…)" —
+        # snippet-by-default rendering plus a quality banner instead of
+        # per-result chrome. The chunk count and the query token still
+        # appear; we just assert the new shape.
+        assert "code chunks for" in text
         assert "bearer" in text.lower() or "token" in text.lower()
 
     def test_tool_call_no_chunks(self, authed_client, app):
