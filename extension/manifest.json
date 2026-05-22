@@ -23,7 +23,9 @@
   "host_permissions": [
     "http://127.0.0.1:8765/*",
     "http://127.0.0.1:8766/*",
-    "https://claude.ai/*"
+    "https://claude.ai/*",
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -33,6 +35,13 @@
     {
       "matches": ["https://claude.ai/*"],
       "js": ["content_common.js", "content_claude.js"],
+      "css": ["badge.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      "js": ["content_common.js", "content_chatgpt.js"],
       "css": ["badge.css"],
       "run_at": "document_idle",
       "all_frames": false
