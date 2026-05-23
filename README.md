@@ -10,16 +10,19 @@
 
 ## The problem
 
-Every LLM tool ships its own memory silo. Switching tools = starting from zero. Two agents on the same project can't see each other's work. Copy-paste between Claude Code, Cursor, Codex, and Gemini CLI is the actual current solution.
+Every LLM tool ships its own memory silo. Switching tools = starting from zero. Two agents on the same project can't see each other's work. Copy-paste between Claude Code, Cursor, Windsurf, Hermes, and a dozen other tools is the actual current solution.
 
 ## The solution
 
 One local daemon. Every coding client connects via MCP (or AGENTS.md for non-MCP tools). They share typed **fragments** (decisions, state, observations, requirements) per **scope** (project / team / org), coordinate via **advisory leases**, and all get the same rendered **AGENTS.md**.
 
 ```
-  Claude Code  Cursor  Codex  Gemini CLI  VS Code  Copilot  opencode
-       │           │        │       │          │        │        │
-       └──── MCP Streamable HTTP (127.0.0.1:8765/mcp) ─────────┘
+  Claude Code  Cursor  Windsurf  Kiro  Codex  Hermes  Goose  Crush  gptme
+       │           │        │      │      │       │       │      │      │
+       └──────────── MCP Streamable HTTP (127.0.0.1:8765/mcp) ─────────┘
+  Continue.dev  Antigravity  VS Code / Copilot  opencode  (+ more via skein connect)
+       │               │              │              │
+       └───────────────┴──────────────┴──────────────┘
                                     │
                        ┌────────────┴────────────┐
                        │   FastAPI + MCP server  │  one process, one port
@@ -62,7 +65,30 @@ pip3 install skn          # macOS users where `pip` points at Python 2
 py -m pip install skn     # Windows
 ```
 
-After `skein up`, every connected LLM (Claude Code, Cursor, Codex, Gemini CLI, Antigravity, Copilot, VS Code, opencode) automatically has shared context for the project. The daemon runs as a background service that survives terminal close **and reboots** on all three OSes — launchd agent on macOS, systemd-user unit on Linux, Scheduled Task (logon trigger, restart-on-failure) on Windows.
+After `skein up`, every detected client automatically has shared context for the project. The daemon runs as a background service that survives terminal close **and reboots** on all three OSes — launchd agent on macOS, systemd-user unit on Linux, Scheduled Task (logon trigger, restart-on-failure) on Windows.
+
+### Supported clients
+
+`skein connect` auto-detects and wires up any of these:
+
+| Client | MCP config written | Notes |
+|--------|--------------------|-------|
+| Claude Code | `claude mcp add skein` | Via CLI; bearer token in header |
+| Cursor | `.cursor/mcp.json` | |
+| Windsurf | `.windsurf/mcp.json` | Uses `serverUrl` key |
+| Kiro | `.kiro/settings/mcp.json` | AWS spec-first IDE (GA May 2026) |
+| VS Code / Copilot | `.vscode/mcp.json` | One entry covers both |
+| Codex CLI | `.codex/config.toml` | TOML `[[mcpServers]]` block |
+| Antigravity | `~/.gemini/antigravity/mcp_config.json` | Google's Gemini CLI replacement |
+| Hermes | `~/.hermes/config.yaml` + `~/.hermes/.env` | Nous Research; token in env var |
+| Goose | `~/.config/goose/config.yaml` | Block; `streamable_http` transport |
+| Crush | `.crush.json` | Charm; explicit `"type": "http"` |
+| gptme | `~/.config/gptme/config.toml` | TOML `[[mcp.servers]]` block |
+| Continue.dev | `~/.continue/mcpServers/skein.yaml` | Dedicated block file |
+| opencode | `~/.config/opencode/config.json` | |
+| Gemini CLI | `~/.gemini/settings.json` | Sunset June 18 2026; use Antigravity |
+
+**Pi.dev**: no native MCP support (deliberate design choice). A community adapter exists at [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) but is unmaintained. Skein does not auto-detect Pi.
 
 ### Windows notes
 
@@ -92,7 +118,7 @@ again on first login in that case.
 | 2. Daemon | Install + start a background service (auto-relocates the venv to `~/.skein/venv` if needed for macOS TCC) |
 | 3. Scope | Auto-detect from git remote (`git@github.com:user/repo.git` → `project:repo`) or cwd name |
 | 4. Hooks | Drop `.claude/settings.json` + `.cursor/rules/skein.mdc` + `.skein/scope` so every LLM auto-recalls and auto-remembers |
-| 5. Sync | Write MCP configs for every detected client (Cursor, VS Code, Codex, Gemini CLI, Antigravity, opencode, Claude Code) + AGENTS.md + CLAUDE.md |
+| 5. Sync | Write MCP configs for every detected client (Claude Code, Cursor, Windsurf, Kiro, Codex, Hermes, Goose, Crush, gptme, Continue.dev, Antigravity, VS Code / Copilot, opencode) + AGENTS.md + CLAUDE.md |
 | 6. Ingest | Index the codebase for semantic search — incremental, free re-runs |
 | 7. Watcher | Spawn a session-scoped subprocess that re-ingests changed files within ~2 seconds. Survives terminal close; dies on logout (re-spawned by next `skein up`) |
 
@@ -440,7 +466,7 @@ If you can't or don't want to install fastembed, fall back to keyword-only:
 skein config set embedding_provider bm25
 ```
 
-> The previous `gemini` embedding provider was removed in iter 27 — its rate limits wedged the daemon's event loop. Existing configs naming `gemini` are silently aliased to `fastembed` on next load. The **Gemini CLI** as an LLM client is unaffected and still a fully-supported sync target.
+> The previous `gemini` embedding provider was removed in iter 27 — its rate limits wedged the daemon's event loop. Existing configs naming `gemini` are silently aliased to `fastembed` on next load. **Gemini CLI** (the terminal agent) is being sunset by Google on June 18, 2026; **Antigravity** is the replacement and is already a fully-supported sync target. Skein continues to detect and connect `gemini_cli` for users still on it.
 
 ---
 
