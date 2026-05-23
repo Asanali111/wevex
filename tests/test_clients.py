@@ -526,3 +526,80 @@ class TestKiroClient:
         detected, note = client.detect()
         assert detected is True
         assert "kiro" in note.lower()
+
+
+# ---------------------------------------------------------------------------
+# Continue.dev
+# ---------------------------------------------------------------------------
+
+class TestContinueClient:
+    def test_connect_writes_yaml_to_mcpservers_dir(self, fake_home, repo):
+        client = clients_mod.ContinueClient()
+        paths = client.connect("http://x/mcp", "tok", "project:p", repo)
+        block = fake_home / ".continue" / "mcpServers" / "skein.yaml"
+        assert block.exists()
+        assert str(block) in paths
+        data = yaml.safe_load(block.read_text())
+        assert data["name"] == "Skein"
+        assert data["schema"] == "v1"
+        servers = data["mcpServers"]
+        assert isinstance(servers, list)
+        skein = next(s for s in servers if s["name"] == "skein")
+        assert skein["url"] == "http://x/mcp"
+        assert skein["type"] == "streamable-http"
+        auth = skein["requestOptions"]["headers"]["Authorization"]
+        assert auth == "Bearer tok"
+
+    def test_connect_overwrites_on_reconnect(self, fake_home, repo):
+        """Second connect must replace the block file, not append to it.
+
+        Same constraint as the iter 18.6 Codex fix: stale tokens must not
+        survive a token rotation."""
+        client = clients_mod.ContinueClient()
+        client.connect("http://x/mcp", "tok1", "project:p", repo)
+        client.connect("http://x/mcp", "tok2", "project:p", repo)
+        block = fake_home / ".continue" / "mcpServers" / "skein.yaml"
+        text = block.read_text()
+        # New token present, old one absent
+        assert "tok2" in text
+        assert "tok1" not in text
+        # Exactly one skein entry
+        data = yaml.safe_load(text)
+        skein_entries = [s for s in data["mcpServers"] if s["name"] == "skein"]
+        assert len(skein_entries) == 1
+
+    def test_disconnect_removes_block_file(self, fake_home, repo):
+        client = clients_mod.ContinueClient()
+        client.connect("http://x/mcp", "tok", "project:p", repo)
+        block = fake_home / ".continue" / "mcpServers" / "skein.yaml"
+        assert block.exists()
+        removed = client.disconnect(recorded_paths=[str(block)])
+        assert not block.exists()
+        assert str(block) in removed
+
+    def test_disconnect_via_default_path(self, fake_home, repo):
+        """disconnect() with no recorded_paths falls back to the default location."""
+        client = clients_mod.ContinueClient()
+        client.connect("http://x/mcp", "tok", "project:p", repo)
+        block = fake_home / ".continue" / "mcpServers" / "skein.yaml"
+        assert block.exists()
+        removed = client.disconnect()
+        assert not block.exists()
+        assert str(block) in removed
+
+    def test_disconnect_missing_file_is_benign(self, fake_home, repo):
+        client = clients_mod.ContinueClient()
+        removed = client.disconnect()
+        assert removed == []
+
+    def test_detect_via_continue_dir(self, fake_home):
+        (fake_home / ".continue").mkdir()
+        client = clients_mod.ContinueClient()
+        detected, note = client.detect()
+        assert detected is True
+        assert ".continue" in note
+
+    def test_clean_machine_not_detected(self, fake_home):
+        client = clients_mod.ContinueClient()
+        detected, _ = client.detect()
+        assert detected is False

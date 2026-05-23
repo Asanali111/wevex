@@ -27,6 +27,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 logger = logging.getLogger("skein.clients")
 
 
@@ -624,6 +626,98 @@ def _remove_skein_from_json(
             _write_json(path, data)
             modified.append(str(path))
     return modified
+
+
+# ---------------------------------------------------------------------------
+# Goose (by Block)
+# ---------------------------------------------------------------------------
+
+def _goose_config_dir() -> Path:
+    """Return Goose's config directory.
+
+    - macOS / Linux: ``~/.config/goose/`` (etcetera XDG strategy, app_name only)
+    - Windows: ``%APPDATA%\\Block\\goose\\`` (etcetera Windows strategy)
+
+    Source: ``crates/goose/src/config/paths.rs`` + ``config-files.md`` in the
+    block/goose repository (verified May 2026).
+    """
+    if _is_windows():
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        return base / "Block" / "goose"
+    return Path.home() / ".config" / "goose"
+
+
+def _read_yaml(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        return data if isinstance(data, dict) else {}
+    except (yaml.YAMLError, OSError):
+        return {}
+
+
+def _write_yaml(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+
+
+class GooseClient(BaseClient):
+    id = "goose"
+    display_name = "Goose"
+    description = "Block's open-source local-first AI agent"
+
+    def detect(self) -> tuple[bool, str]:
+        return _detect_any(
+            _detect_binary("goose"),
+            _detect_path(_goose_config_dir()),
+        )
+
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
+        cfg_dir = _goose_config_dir()
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        path = cfg_dir / "config.yaml"
+        data = _read_yaml(path)
+        data.setdefault("extensions", {})
+        # Goose's streamable_http extension schema (ExtensionConfig in
+        # crates/goose/src/agents/extension.rs, serde rename = "streamable_http"):
+        #   enabled, type, name, description, uri, headers, timeout
+        data["extensions"]["skein"] = {
+            "enabled": True,
+            "type": "streamable_http",
+            "name": "skein",
+            "description": "Skein MCP context bus",
+            "uri": mcp_url,
+            "headers": {"Authorization": f"Bearer {bearer_token}"},
+            "timeout": 300,
+        }
+        _write_yaml(path, data)
+        return [str(path)]
+
+    def disconnect(self, recorded_paths=None) -> list[str]:
+        modified: list[str] = []
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        default = _goose_config_dir() / "config.yaml"
+        for raw in (*( recorded_paths or []), str(default)):
+            if raw in seen:
+                continue
+            seen.add(raw)
+            candidates.append(Path(raw))
+
+        for path in candidates:
+            if not path.exists():
+                continue
+            data = _read_yaml(path)
+            exts = data.get("extensions", {})
+            if isinstance(exts, dict) and "skein" in exts:
+                del exts["skein"]
+                _write_yaml(path, data)
+                modified.append(str(path))
+        return modified
 
 
 # ---------------------------------------------------------------------------
