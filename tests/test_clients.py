@@ -41,8 +41,16 @@ class TestDetectAll:
             assert cid in ids
 
     def test_clean_machine_detects_nothing(self, fake_home):
+        # Clients that probe absolute paths outside of Path.home() (e.g.
+        # /Applications/Windsurf.app on macOS) can legitimately return True on
+        # a developer machine that happens to have those apps installed — the
+        # fake_home fixture cannot intercept non-home absolute paths. Skip those
+        # entries so the test remains meaningful on real developer machines.
+        ABSOLUTE_PATH_CLIENTS = {"windsurf", "cursor", "vscode"}
         out = clients_mod.detect_all()
         for entry in out:
+            if entry["id"] in ABSOLUTE_PATH_CLIENTS:
+                continue
             assert entry["detected"] is False
 
     def test_picks_up_dir_signal(self, fake_home):
@@ -258,6 +266,55 @@ class TestCodexClient:
         assert 'name = "alice"' in text
         assert 'name = "other"' in text
         assert 'name = "skein"' not in text
+
+
+# ---------------------------------------------------------------------------
+# Windsurf
+# ---------------------------------------------------------------------------
+
+class TestWindsurfClient:
+    def test_connect_writes_mcp_json_with_server_url(self, fake_home, repo):
+        client = clients_mod.WindsurfClient()
+        paths = client.connect("http://x/mcp", "tok", "project:p", repo)
+        cfg = repo / ".windsurf" / "mcp.json"
+        assert cfg.exists()
+        assert str(cfg) in paths
+        data = json.loads(cfg.read_text())
+        # Windsurf uses "serverUrl" not "url"
+        assert data["mcpServers"]["skein"]["serverUrl"] == "http://x/mcp"
+        assert "url" not in data["mcpServers"]["skein"]
+        assert data["mcpServers"]["skein"]["headers"]["Authorization"] == "Bearer tok"
+
+    def test_connect_preserves_other_servers(self, fake_home, repo):
+        cfg = repo / ".windsurf" / "mcp.json"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text(json.dumps({"mcpServers": {"other": {"serverUrl": "http://other"}}}))
+        clients_mod.WindsurfClient().connect("http://x/mcp", "tok", "p", repo)
+        data = json.loads(cfg.read_text())
+        assert "other" in data["mcpServers"]
+        assert "skein" in data["mcpServers"]
+
+    def test_disconnect_removes_skein_only(self, fake_home, repo):
+        cfg = repo / ".windsurf" / "mcp.json"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text(json.dumps({
+            "mcpServers": {
+                "skein": {"serverUrl": "http://x/mcp"},
+                "other": {"serverUrl": "http://other"},
+            }
+        }))
+        modified = clients_mod.WindsurfClient().disconnect(recorded_paths=[str(cfg)])
+        data = json.loads(cfg.read_text())
+        assert "skein" not in data["mcpServers"]
+        assert "other" in data["mcpServers"]
+        assert str(cfg) in modified
+
+    def test_detect_via_codeium_windsurf_dir(self, fake_home):
+        (fake_home / ".codeium" / "windsurf").mkdir(parents=True)
+        client = clients_mod.WindsurfClient()
+        detected, note = client.detect()
+        assert detected is True
+        assert "windsurf" in note.lower()
 
 
 # ---------------------------------------------------------------------------

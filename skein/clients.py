@@ -116,6 +116,25 @@ def _detect_any(*results: tuple[bool, str]) -> tuple[bool, str]:
     return False, "; ".join(r[1] for r in results)
 
 
+def _write_hermes_env_key(env_path: Path, key: str, value: str) -> None:
+    """Write or update KEY=VALUE in a ~/.hermes/.env file."""
+    lines = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    found = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f"{key}="):
+            lines[i] = f"{key}={value}\n"
+            found = True
+            break
+    if not found:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(f"{key}={value}\n")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text("".join(lines), encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # BaseClient
 # ---------------------------------------------------------------------------
@@ -608,6 +627,115 @@ def _remove_skein_from_json(
 
 
 # ---------------------------------------------------------------------------
+# Windsurf
+# ---------------------------------------------------------------------------
+
+class WindsurfClient(BaseClient):
+    id = "windsurf"
+    display_name = "Windsurf"
+    description = "Codeium's AI-native IDE"
+
+    def detect(self) -> tuple[bool, str]:
+        candidates = [Path.home() / ".codeium" / "windsurf"]
+        if _is_macos():
+            candidates.append(Path("/Applications/Windsurf.app"))
+        return _detect_any(
+            _detect_binary("windsurf"),
+            _detect_path(*candidates),
+        )
+
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
+        path = repo / ".windsurf" / "mcp.json"
+        data = _read_json(path)
+        data.setdefault("mcpServers", {})
+        data["mcpServers"]["skein"] = {
+            "serverUrl": mcp_url,   # Windsurf uses "serverUrl" not "url"
+            "headers": {"Authorization": f"Bearer {bearer_token}"},
+        }
+        _write_json(path, data)
+        return [str(path)]
+
+    def disconnect(self, recorded_paths=None) -> list[str]:
+        return _remove_skein_from_json(
+            recorded_paths or [],
+            ["mcpServers"],
+            default_paths=[Path.cwd() / ".windsurf" / "mcp.json"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Hermes (Nous Research)
+# ---------------------------------------------------------------------------
+
+class HermesClient(BaseClient):
+    id = "hermes"
+    display_name = "Hermes"
+    description = "Nous Research's autonomous AI agent"
+
+    def detect(self) -> tuple[bool, str]:
+        return _detect_any(
+            _detect_binary("hermes"),
+            _detect_path(Path.home() / ".hermes"),
+        )
+
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
+        import yaml
+        hermes_home = Path.home() / ".hermes"
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        config_path = hermes_home / "config.yaml"
+        env_path = hermes_home / ".env"
+
+        # Write token to .env
+        _write_hermes_env_key(env_path, "MCP_SKEIN_API_KEY", bearer_token)
+
+        # Update config.yaml
+        config = {}
+        if config_path.exists():
+            try:
+                config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                config = {}
+        config.setdefault("mcp_servers", {})["skein"] = {
+            "url": mcp_url,
+            "headers": {"Authorization": "Bearer ${MCP_SKEIN_API_KEY}"},
+        }
+        tmp = config_path.with_suffix(".yaml.tmp")
+        tmp.write_text(
+            yaml.dump(config, default_flow_style=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        os.replace(tmp, config_path)
+        return [str(config_path), str(env_path)]
+
+    def disconnect(self, recorded_paths=None) -> list[str]:
+        import yaml
+        config_path = Path.home() / ".hermes" / "config.yaml"
+        env_path = Path.home() / ".hermes" / ".env"
+        modified = []
+        if config_path.exists():
+            try:
+                config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                config = {}
+            servers = config.get("mcp_servers", {})
+            if isinstance(servers, dict) and "skein" in servers:
+                del servers["skein"]
+                if not servers:
+                    config.pop("mcp_servers", None)
+                tmp = config_path.with_suffix(".yaml.tmp")
+                tmp.write_text(
+                    yaml.dump(config, default_flow_style=False, allow_unicode=True),
+                    encoding="utf-8",
+                )
+                os.replace(tmp, config_path)
+                modified.append(str(config_path))
+        if env_path.exists():
+            _write_hermes_env_key(env_path, "MCP_SKEIN_API_KEY", "")
+            modified.append(str(env_path))
+        return modified
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -619,6 +747,8 @@ ALL_CLIENTS: list[BaseClient] = [
     AntigravityClient(),
     OpenCodeClient(),
     CodexClient(),
+    WindsurfClient(),
+    HermesClient(),
 ]
 
 
