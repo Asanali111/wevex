@@ -1584,6 +1584,17 @@ def serve(
         )
         sys.exit(1)
 
+    # Iter 35: refuse to start if another daemon already holds the
+    # single-instance lock. Catches the case where a second `skein serve
+    # --port N` would otherwise happily run in parallel (how the iter-30
+    # 8766 leftover ran alongside 8765 for three days). Exits code 0 on
+    # contention so launchd's KeepAlive=true doesn't loop.
+    from . import paths as _skein_paths
+    from . import single_instance as _single_instance
+    _lock_handle = _single_instance.acquire_or_exit(
+        _skein_paths.daemon_lock_file(), stderr=sys.stderr,
+    )
+
     # Iter 28 Windows port: when `skein serve` is launched by a Windows
     # Scheduled Task (`schtasks /Run`), there is no console attached and
     # nothing redirects stdout/stderr. macOS' launchd plist sets
