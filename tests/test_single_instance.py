@@ -39,6 +39,13 @@ def test_fresh_acquire_succeeds(lock_path: Path) -> None:
     single_instance.release(result.handle)
 
 
+@pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="msvcrt.locking locks a byte range on the file, so reading the "
+           "file via lock_path.read_text() raises PermissionError while the "
+           "current process holds the lock. Cross-process PID-read coverage "
+           "is provided by test_subprocess_holding_lock_blocks_other_process",
+)
 def test_pid_written_into_lock_file(lock_path: Path) -> None:
     result = single_instance.acquire(lock_path)
     assert result.acquired is True
@@ -142,6 +149,14 @@ def test_release_is_idempotent_on_none() -> None:
     single_instance.release(None)  # must not raise
 
 
+@pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="msvcrt.locking is per-fd, so the same process can re-acquire "
+           "its own lock through a second open() — the within-process "
+           "contention scenario this test exercises only fires on Unix. "
+           "Cross-process contention (the actual daemon-duplicate bug) is "
+           "covered by test_subprocess_holding_lock_blocks_other_process",
+)
 def test_acquire_or_exit_exits_zero_on_contention(
     lock_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
