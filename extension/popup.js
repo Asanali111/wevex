@@ -9,6 +9,7 @@ const $scope = document.getElementById("scope");
 const $enabled = document.getElementById("enabled");
 const $repair = document.getElementById("repair");
 const $test = document.getElementById("test");
+const $testQuery = document.getElementById("testQuery");
 const $testResult = document.getElementById("test-result");
 
 function setStatus(text, kind = "ok") {
@@ -85,10 +86,16 @@ $repair.addEventListener("click", async () => {
 });
 
 $test.addEventListener("click", async () => {
+  const query = $testQuery.value.trim();
+  if (!query) {
+    $testResult.style.display = "block";
+    $testResult.textContent = "enter a query to test (e.g. 'auth flow', 'what we shipped this week')";
+    return;
+  }
   $testResult.style.display = "block";
-  $testResult.textContent = "calling recall('hello world')…";
+  $testResult.textContent = `calling recall(${JSON.stringify(query)})…`;
   try {
-    const r = await send({ type: "recall", query: "hello world test", limit: 3 });
+    const r = await send({ type: "recall", query, limit: 3 });
     if (!r.ok) {
       $testResult.textContent = `error: ${r.error}`;
       return;
@@ -97,6 +104,14 @@ $test.addEventListener("click", async () => {
     $testResult.textContent = text.slice(0, 1000);
   } catch (err) {
     $testResult.textContent = `error: ${err.message}`;
+  }
+});
+
+// Enter inside the query field triggers test.
+$testQuery.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    $test.click();
   }
 });
 
