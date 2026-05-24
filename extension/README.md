@@ -1,138 +1,109 @@
-# Skein browser extension — experimental
+# Skein browser extension
 
-A browser extension that injects local Skein context into prompts on
-**claude.ai**, **chatgpt.com**, and **gemini.google.com**. Lives on
-the `experiment/browser-extension` branch only — does **not** affect
-the main `skein up` workflow.
+Inject local Skein context into prompts on **claude.ai**, **chatgpt.com**,
+and **gemini.google.com** — and save assistant turns back to Skein
+with one click.
 
-Iter 30 shipped the claude.ai prototype. Iter 33 extracted the shared
-hot-path logic into `content_common.js` and added content scripts for
-ChatGPT and Gemini. Three sites, one shared core — future relevance /
-recall fixes (like iter 32's token-waste skip) land in one file and
-all three sites inherit.
+The extension is a thin client of your existing `skein up` daemon. It
+runs entirely against `127.0.0.1`. Prompts never leave the machine.
 
-## How to test it
+## What it does
 
-### 1. Start an experimental daemon on port 8766
+1. **Context injection on send.** When you hit Enter, the extension
+   asks Skein for context relevant to your prompt and prepends a
+   `[Skein context — auto-injected ...]` block before submitting.
+   If Skein has no high-signal match (daemon says `relevance=low|none`),
+   the extension skips injection so it doesn't waste tokens.
 
-Your normal daemon on port 8765 keeps running and keeps serving Claude
-Code / Cursor / Codex without interruption. The extension talks to
-port 8766 by default.
+2. **Save to Skein (iter 35).** Every assistant turn renders a small
+   "Save to Skein" button in the top-right corner. Click to save the
+   turn as a note — the daemon classifies type / tags / value
+   automatically. Useful for capturing one-off insights mid-conversation
+   that would otherwise evaporate when the session ends.
+
+3. **Floating badge.** Bottom-right corner shows daemon health, active
+   scope, and fragment count. Green = ready, yellow = no scope picked,
+   red = daemon unreachable.
+
+## Install (5 minutes)
+
+### 1. Make sure your daemon is at v0.2.0 or newer
 
 ```bash
-cd ~/Documents/company-brain-experiment
-PYTHONPATH=$(pwd) /Users/ameliomar/.skein/venv/bin/python3.12 \
-    -m skein serve --port 8766 --host 127.0.0.1 > /tmp/skein_exp.log 2>&1 &
-
-# verify it's up
-curl -s http://127.0.0.1:8766/health
-# → {"status":"ok","fragment_count":129,...}
+skein --version          # should print 0.2.0 (or higher)
+skein update             # if not, bump and restart
 ```
 
-If you'd rather have the extension talk to your prod daemon on 8765,
-open the extension toolbar popup after install and change the
-**Daemon** field to `http://127.0.0.1:8765`. But the production daemon
-doesn't have the `/v1/pair-browser` endpoint yet — that ships on this
-branch only — so pairing would fail. Use 8766 for now.
+The extension's pairing endpoint (`/v1/pair-browser`) lands in v0.2.0.
+Older daemons will refuse to pair.
 
-### 2. Load the extension in Chrome
+### 2. Load the extension in a Chromium browser
 
-1. Open `chrome://extensions` in Chrome (or `edge://extensions`,
-   `brave://extensions` — anything Chromium-based works).
+Works in Chrome, Brave, Arc, Edge — anything Chromium-based.
+
+1. Open `chrome://extensions` (or `brave://extensions`, etc.).
 2. Toggle **Developer mode** on (top-right corner).
 3. Click **Load unpacked**.
-4. Pick this directory: `~/Documents/company-brain-experiment/extension/`.
-5. Chrome should show "Skein for browser LLMs (experimental) · 0.0.1"
-   in the extension list with a small purple-and-white S icon.
+4. Pick this directory: `~/Documents/company-brain/extension/`.
+5. Chrome should list "Skein for browser LLMs · 0.2.0" with a small icon.
 
-### 3. Pair + pick a scope
+Firefox support is on the roadmap (MV3 differences are small); Safari
+is deferred (Xcode + Apple Developer Program required).
 
-1. Click the Skein extension icon in the Chrome toolbar — opens the popup.
-2. **Status** at the top should turn green:
-   `✓ paired · N scope(s) available`.
-   If it's red ("daemon unreachable"), the experimental daemon isn't
-   running on 8766 — go back to step 1.
-3. **Scope** dropdown — pick the project you want context for
-   (e.g. `project:ameliomar`).
-4. The **Inject context on send** checkbox is on by default. Leave it.
-5. Click **Test recall** to confirm end-to-end works. You should see
-   recall results render in the box below.
+### 3. Pair and pick a scope
 
-### 4. Use it on claude.ai / chatgpt.com / gemini.google.com
+1. Click the Skein icon in the toolbar — opens the popup.
+2. **Status** should turn green: `✓ paired · N scope(s) available`.
+   If red, your daemon isn't running — `skein up` first.
+3. **Scope** dropdown — pick your project (e.g. `project:myapp`).
+4. **Inject context on send** is on by default. Leave it.
+5. **Query** field + **Test recall** — confirm end-to-end works.
 
-1. Open whichever site you want to test in a new tab:
-   - `https://claude.ai/new`
-   - `https://chatgpt.com/`
-   - `https://gemini.google.com/app`
-2. **Bottom-right corner** — you should see a dark floating badge:
-   `● Skein  · project:ameliomar · 129 fragments`.
-   Green dot = paired and ready. Yellow = no scope picked (open the
-   popup). Red = daemon unreachable.
-3. Open DevTools (Cmd-Opt-I) → Console tab → filter by `[skein]`.
-   You'll see log lines as the extension boots.
-4. Type a real question — something the LLM might benefit from project
-   context for. e.g. *"how does the daemon handle the launchd race?"*
-5. **Hit Enter (or click Send).**
+### 4. Use it
 
-What you should see happen, in this order:
+Open any supported site:
+- `https://claude.ai/new`
+- `https://chatgpt.com/`
+- `https://gemini.google.com/app`
 
-- A small blue toast above the badge: `Skein → recalling context…`
-- Within ~50 ms, a second toast: `Skein → injected N lines`
-- The text in your message box updates — you can literally see a
-  `[Skein context — auto-injected by browser extension ...]` block
-  prepended to your original prompt.
-- The message submits to Claude with the injected context attached.
-- Claude responds using the context. Look for it referencing project
-  decisions, file paths, or numbers it couldn't have known otherwise.
+Type a real question. Hit Enter. You should see:
 
-### 5. Verifying it's actually working (not just rendering)
+- A small blue toast: `Skein → recalling context…`
+- A `[Skein context — auto-injected ...]` block prepended to your prompt.
+- The message submits with context attached.
+- The assistant references project facts it couldn't have known otherwise.
+
+After the assistant finishes streaming, hover any turn to reveal the
+**Save to Skein** button in its top-right. Click to capture.
+
+## Verifying it's working
 
 Three independent signals:
 
-**Signal 1 — DevTools console.**
-Open Console, filter `[skein]`. You should see a chain like:
+**Console (`Cmd-Opt-I` → Console, filter `[skein]`):**
 ```
 [skein] content script loaded for claude.ai
-[skein] paired ✓ daemon= http://127.0.0.1:8766
-[skein] intercept (keydown:Enter) for query: how does the daemon handle …
-[skein] injecting 412 chars of context
+[skein] paired ✓ daemon= http://127.0.0.1:8765
+[skein] intercept (keydown:Enter) for query: how does auth work…
+[skein] injecting 412 chars of context, relevance=high
 ```
 
-**Signal 2 — daemon log.**
+**Daemon log:**
 ```bash
-tail -f /tmp/skein_exp.log
+skein tail   # or tail -f ~/.config/skein/logs/daemon.log
 ```
-You'll see `POST /v1/pair-browser` and `POST /mcp` lines fire each time
-you submit a prompt.
+You'll see `POST /v1/pair-browser` once, then `POST /mcp` per submit.
 
-**Signal 3 — Claude's response quality.**
-Ask something only Skein could know (e.g. *"what did I decide about
-the kickstart -k flag?"*). Without the extension, Claude has zero
-context. With the extension on, Claude should answer specifically,
-because the iter-28 perf decision fragment got injected.
+**Assistant quality.** Ask something only Skein could know — e.g.
+*"what did we decide about the auth flow?"*. Without the extension,
+the LLM has no context. With it on, the answer is specific.
 
 ## Turning it off
 
-- **Per-message**: hold Shift+Enter to add a newline instead of submitting;
-  the interceptor only fires on bare Enter. (Plus the toggle in popup.)
-- **Per-session**: toolbar icon → uncheck **Inject context on send**.
-- **Entirely**: `chrome://extensions` → toggle Skein off, or **Remove**.
-
-## What's missing
-
-This is still a prototype. Known limits:
-
-- **No write-back.** The LLM's response isn't captured anywhere. A
-  future iter will add a "Save to Skein" button on hover over assistant
-  messages.
-- **No streaming-aware feedback.** The "injected" toast disappears
-  after 1.5 s; for long responses you can't go back and see exactly
-  what got injected. (Console logs are the audit trail.)
-- **DOM selector drift.** ChatGPT and Gemini ship UI changes
-  frequently — selectors are written defensively (multiple fallbacks
-  per site) but a hard breaking change will require a selector update.
-  Check the DevTools console for `[skein] prompt element gone` if
-  injection silently stops.
+- **Per-message:** hold Shift+Enter — the interceptor only fires on
+  bare Enter. (Plus the popup toggle.)
+- **Per-session:** toolbar icon → uncheck **Inject context on send**.
+- **Entirely:** `chrome://extensions` → toggle Skein off, or **Remove**.
 
 ## What's safe
 
@@ -141,23 +112,18 @@ This is still a prototype. Known limits:
 - The extension reads your prompt text (it has to, to know what to
   recall) but never sends it anywhere except the daemon.
 - The bearer token is stored in `chrome.storage.local`, sandboxed to
-  this extension. Other websites can't read it.
+  this extension. Other extensions and websites can't read it.
+- The daemon's `/v1/pair-browser` endpoint validates the request
+  `Origin` against `^chrome-extension://[a-z0-9]+$` so a malicious
+  webpage can't pair itself.
 
-## Tearing it down
+## Known limits
 
-```bash
-# 1. Remove from Chrome
-chrome://extensions → Skein → Remove
-
-# 2. Stop the experimental daemon
-pkill -f "skein serve --port 8766"
-
-# 3. If you decide to abandon the experiment entirely:
-cd ~/Documents/company-brain
-git worktree remove ../company-brain-experiment
-git branch -D experiment/browser-extension
-git push origin --delete experiment/browser-extension
-```
-
-Your real daemon at port 8765 and all of `main` stay untouched the
-entire time.
+- **DOM selector drift.** ChatGPT and Gemini ship UI changes
+  frequently — selectors are written defensively (multiple fallbacks
+  per site) but a hard breaking change will need a selector update.
+  Check the console for `[skein] prompt element gone` if injection
+  silently stops.
+- **No streaming-aware feedback.** The "injected" toast disappears
+  after 1.5 s; for long responses the console logs are the audit trail.
+- **Firefox / Safari not yet supported.** Chromium MV3 only.

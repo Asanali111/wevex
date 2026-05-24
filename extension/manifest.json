@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Skein for browser LLMs (experimental)",
-  "version": "0.1.0",
-  "description": "Inject local Skein context into claude.ai / chatgpt.com / gemini.google.com prompts. Talks to your local Skein daemon on 127.0.0.1.",
+  "name": "Skein for browser LLMs",
+  "version": "0.2.0",
+  "description": "Inject local Skein context into claude.ai / chatgpt.com / gemini.google.com prompts and save assistant turns back to Skein with one click. Talks to your local Skein daemon on 127.0.0.1.",
   "icons": {
     "16":  "icons/skein-16.png",
     "48":  "icons/skein-48.png",
