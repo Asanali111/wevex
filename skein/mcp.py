@@ -428,7 +428,10 @@ _TOOLS = [
             "non-obvious decision so other tools (you in a later session, or "
             "other LLMs) can recall it. Dedupes by content+scope+source_tool — "
             "safe to call eagerly. Returns the fragment ID. ~5ms. "
-            "Scope auto-detected from cwd."
+            "Scope auto-detected from cwd. Pass `from_recall` with the "
+            "recall_id from a prior recall() response when this write is a "
+            "follow-up to that recall — lets Skein learn which recalls "
+            "actually produced useful context."
         ),
         "inputSchema": {
             "type": "object",
@@ -444,8 +447,32 @@ _TOOLS = [
                 "territory": {"type": "string", "description": "File/domain area, e.g. 'backend/auth'"},
                 "tags": {"type": "array", "items": {"type": "string"}},
                 "ttl_seconds": {"type": "integer", "description": "TTL override. 0 = permanent."},
+                "from_recall": {"type": "string", "description": "Optional recall_id from a prior recall() this write follows from. Lets Skein link recalls to outcomes for value tuning."},
             },
             "required": ["content", "type"],
+        },
+    },
+    {
+        "name": "note",
+        "description": (
+            "ONE-ARGUMENT capture — pass any sentence-or-paragraph you want "
+            "future sessions to inherit, the daemon classifies type/tags/value "
+            "automatically. Use this when you just shipped something, "
+            "finalized a plan, or hit a non-obvious gotcha and would otherwise "
+            "skip `remember` because of the type/tags ceremony. ~5ms. "
+            "Scope auto-detected. ALWAYS prefer this over leaving the insight "
+            "in chat — chat evaporates between sessions; notes don't. "
+            "Pass `from_recall` with the recall_id from a prior recall() "
+            "response when this note follows from that recall."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "What to remember (free text)"},
+                "scope": {"type": "string", "description": "Scope handle. Omit to auto-detect."},
+                "from_recall": {"type": "string", "description": "Optional recall_id from a prior recall() this note follows from. Lets Skein link recalls to outcomes for value tuning."},
+            },
+            "required": ["content"],
         },
     },
     {
@@ -882,6 +909,7 @@ async def _call_tool(
 
     # ---- recall ----
     if name == "recall":
+        import asyncio
         from .events import log_event
         req = RecallRequest(
             query=args["query"],
@@ -890,12 +918,34 @@ async def _call_tool(
             territory=args.get("territory"),
             limit=args.get("limit", 3),
         )
+        # Iter 35: mint a recall_id for outcome telemetry. The LLM passes it
+        # back via remember(from_recall=...) or note(from_recall=...) when
+        # the recall actually informed a write. Cheap to record, lets the
+        # value-decay loop later learn from outcomes instead of hit counts.
+        recall_id = secrets.token_hex(6)
+        try:
+            storage.record_recall_event(recall_id, args["query"], args["scope"])
+        except Exception:
+            logger.warning("record_recall_event failed; continuing", exc_info=True)
         # Offload to a worker thread — do_recall's embedding call + SQLite
         # queries are synchronous and would otherwise block the asyncio
         # event loop (and /health) during fastembed's first-call warm-up
         # or any slow embed/search.
         response = await asyncio.to_thread(do_recall, req, storage, provider)
         log_event("recall", scope=args["scope"], query=args["query"][:120], hits=response.total)
+        _recall_footer = (
+            f"\n[skein:recall_id={recall_id}] "
+            f"— pass via remember(from_recall=\"{recall_id}\") or "
+            f"note(from_recall=\"{recall_id}\") if this informs a write"
+        )
+        # Iter 32: machine-readable relevance signal. Browser extension reads
+        # the marker on line 1 and skips prompt injection when relevance is
+        # "low" or "none" — the headline token-waste fix from this iter.
+        if not response.results:
+            _relevance = "none"
+        else:
+            _relevance = response.results[0].quality  # high|medium|low|none
+        _marker = f"[skein:relevance={_relevance}]"
         # Iter 29 day-one: empty-OR-low-quality recall offers a write
         # suggestion. With hybrid BM25+vector+RRF, true `[]` results are
         # rare — but a top-quality of "none" means Skein has nothing
@@ -937,17 +987,34 @@ async def _call_tool(
                         f"{response.total} candidate fragments scored as "
                         f"low-signal (quality=none).{total_note} "
                     )
+                # Iter 32 drift nudge: when nothing matched AND nothing has
+                # been written recently across any tool, hint that this scope
+                # is going cold — the calling LLM might be the one to add to it.
+                try:
+                    recent_total = sum(storage.recent_writes_by_tool(hours=24).values())
+                except Exception:
+                    recent_total = None
+                drift_hint = ""
+                if recent_total == 0:
+                    drift_hint = (
+                        " No fragments have been written across any tool in "
+                        "the last 24h — if you're working through something "
+                        "load-bearing, this scope is the place to capture it."
+                    )
                 suggestion = (
+                    f"{_marker}\n"
                     f"{preface}"
                     f"If you have context for this, call "
                     f"`remember(content=\"<your answer or decision>\", "
-                    f"type=\"fact\", scope=\"{args['scope']}\")` so the "
+                    f"type=\"fact\", scope=\"{args['scope']}\", "
+                    f"from_recall=\"{recall_id}\")` so the "
                     f"next session (or another LLM working on this project) "
-                    f"sees it. Suggested writeup query: \"{escaped}\"."
+                    f"sees it. Suggested writeup query: \"{escaped}\".{drift_hint}"
+                    f"{_recall_footer}"
                 )
                 return _tool_text(suggestion)
             if not response.results:
-                return _tool_text("No relevant context found.")
+                return _tool_text(f"{_marker}\nNo relevant context found.{_recall_footer}")
             # Low-signal but unusable query — fall through to normal rendering.
         # Iter 31: snippet-by-default rendering. Drops average payload from
         # ~750 tokens/fragment to ≤80 by truncating content to a 320-char
@@ -966,7 +1033,7 @@ async def _call_tool(
         elif top_quality == "low":
             header += "\n[top match is low quality — verify before relying.]"
 
-        lines = [header, ""]
+        lines = [_marker, header, ""]
         any_truncated = False
         for r in response.results:
             f = r.fragment
@@ -980,7 +1047,7 @@ async def _call_tool(
                 "Snippets shown. Call `recall_one(fragment_id)` "
                 "for full text on any result."
             )
-        return _tool_text("\n".join(lines))
+        return _tool_text("\n".join(lines) + _recall_footer)
 
     # ---- recall_one ----
     if name == "recall_one":
@@ -1037,7 +1104,83 @@ async def _call_tool(
             "remember", scope=args["scope"], fragment_id=frag.id,
             type=frag.type, preview=args["content"][:80],
         )
-        return _tool_text(f"Stored fragment {frag.id[:8]}… (type={frag.type})")
+        # Iter 35: link to originating recall if the LLM passed one.
+        link_note = ""
+        from_recall = args.get("from_recall")
+        if from_recall:
+            try:
+                linked = storage.link_recall_to_fragment(from_recall, frag.id)
+                if linked:
+                    link_note = f" [linked to recall {from_recall[:8]}…]"
+            except Exception:
+                logger.warning("link_recall_to_fragment failed", exc_info=True)
+        return _tool_text(f"Stored fragment {frag.id[:8]}… (type={frag.type}){link_note}")
+
+    # ---- note (iter 32: low-friction one-arg capture) ----
+    if name == "note":
+        content = args["content"]
+        # Cheap type inference so the daemon doesn't need an LLM round-trip.
+        # value.py will compute the real ranking value at create_fragment time.
+        import re as _re_note
+        lower = content.lower().lstrip()
+        if _re_note.match(r"(decided|concluded|chose|we will|iter\s+\d+\s+(shipped|complete|done))", lower):
+            inferred_type = "decision"
+        elif _re_note.match(r"(todo|fixme|must |should |need to)", lower):
+            inferred_type = "requirement"
+        elif _re_note.match(r"(prefer |use \w+ over|always use|never use)", lower):
+            inferred_type = "preference"
+        else:
+            inferred_type = "fact"
+
+        scope = _ensure_scope(args["scope"])
+        from .embeddings import vec_to_bytes
+        from .models import CommitCreate
+        embedding_bytes = None
+        try:
+            vec = await asyncio.to_thread(provider.embed_one, content)
+            embedding_bytes = vec_to_bytes(vec)
+        except Exception:
+            pass
+        commit = storage.create_commit(CommitCreate(
+            author_id=owner_id, scope_id=scope.id,
+            message=f"[mcp] note: {content[:60]}",
+        ))
+        frag = storage.create_fragment(
+            FragmentCreate(
+                content=content, type=inferred_type,
+                scope_id=scope.id, owner_id=owner_id,
+                created_by_tool=client_name,
+                created_in_session_id=session_id,
+                created_against_commit=git_head,
+                files_open_at_creation=files_open,
+                extraction_method="explicit",
+                extraction_confidence=1.0,
+            ),
+            commit_id=commit.id, embedding=embedding_bytes,
+        )
+        storage._conn.execute(
+            "UPDATE commits SET fragments_added = ? WHERE id = ?",
+            (f'["{frag.id}"]', commit.id),
+        )
+        from .events import log_event
+        log_event(
+            "note", scope=args["scope"], fragment_id=frag.id,
+            type=inferred_type, preview=content[:80],
+        )
+        # Iter 35: link to originating recall if the LLM passed one.
+        link_note = ""
+        from_recall = args.get("from_recall")
+        if from_recall:
+            try:
+                linked = storage.link_recall_to_fragment(from_recall, frag.id)
+                if linked:
+                    link_note = f" [linked to recall {from_recall[:8]}…]"
+            except Exception:
+                logger.warning("link_recall_to_fragment failed", exc_info=True)
+        return _tool_text(
+            f"Noted as {inferred_type} (id={frag.id[:8]}…).{link_note} "
+            f"Skein classified it automatically — call recall_one if you need to verify."
+        )
 
     # ---- note_decision ----
     if name == "note_decision":
@@ -1525,28 +1668,32 @@ working on this project. Other agents (Claude Code, Cursor, Codex, Gemini \
 CLI, Antigravity, …) may have already stored decisions, observations, and \
 codebase chunks here.
 
-Rules — apply on every turn:
+YOUR JOB: leave the store better than you found it. Read what's there, \
+write what's missing.
+
+READ rules — apply on every turn:
 
 1. Before answering ANY question about this project's code, decisions, \
-history, or architecture, call the `recall` tool first. Pass the user's \
-question (or your task) as the query.
-2. For code-level questions ("where is X defined?", "how does Y work?"), \
-also call `search_code` to retrieve relevant codebase chunks.
-3. `recall` returns ≤80-token snippets per result. When you need the full \
-text of any result, call `recall_one(fragment_id)` — the id is in every \
-result line.
-4. If `recall` and `search_code` return nothing, say "I don't have context \
-on that yet" — do not invent details.
-5. After you make a non-trivial decision, finalize a plan, finish a task, \
-or learn something the next agent will need, call `remember` (or \
-`note_decision` for architectural choices) so future sessions inherit it. \
-Keep fragments concise — ≤800 chars works best for recall; long-form \
-narrative belongs in commit bodies or external docs.
-6. Treat the returned fragments as authoritative project state. Prefer \
-them over your prior assumptions.
+history, or architecture, call the `recall` tool first.
+2. For code-level questions ("where is X defined?"), also call \
+`search_code`.
+3. `recall` returns ≤80-token snippets. For full text, `recall_one(id)`.
+4. If `recall` returns nothing, say "I don't have context on that yet" — \
+do not invent details.
+
+WRITE rules — apply at the end of every iteration:
+
+5. After shipping a feature, finalizing a plan, picking an approach, or \
+hitting a non-obvious gotcha, call `note(content="…")` — ONE argument, \
+daemon classifies automatically. This is the cheapest write tool; reach \
+for it the moment you'd otherwise leave the insight only in chat. Chat \
+evaporates between sessions; notes don't.
+6. For load-bearing architectural choices with structured rationale, \
+use `note_decision(content, alternatives, rationale)`. For long-form \
+context, `remember(content, type)` with the right type.
 
 Skein is the single source of truth for cross-session, cross-agent project \
-context. Use it eagerly.
+context. Read eagerly; write often.
 """
 
 

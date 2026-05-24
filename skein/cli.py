@@ -676,61 +676,694 @@ def restart() -> None:
         sys.exit(1)
 
 
-@main.group("daemon", hidden=True)
-def daemon_grp() -> None:
-    """Inspect or control the persistent daemon."""
+@main.command()
+@click.option("--check", "check_only", is_flag=True, default=False,
+              help="Only check for an update; don't install anything.")
+def update(check_only: bool) -> None:
+    """Upgrade Skein to the latest version and restart the daemon.
 
-
-@daemon_grp.command("status")
-@click.option("--json", "output_json", is_flag=True, default=False)
-def daemon_status(output_json: bool) -> None:
-    """Show daemon backend, PID, and health."""
-    from dataclasses import asdict
+    Detects how Skein was installed (pipx / uv tool / pip) and runs the
+    appropriate upgrade command, then restarts the daemon.
+    """
     from . import ui
-    from .daemon import current_status
-    s = current_status()
-    if output_json:
-        print(json.dumps(asdict(s), indent=2))
+    from .version_check import check_for_update, _current_version, _fetch_latest
+
+    current = _current_version()
+    ui.blank()
+    console.print(f"  Current version: [bold]{current}[/bold]")
+
+    latest = _fetch_latest()
+    if latest is None:
+        err_console.print(
+            "  [red]✗[/red] Could not reach PyPI. Check your network connection."
+        )
+        sys.exit(1)
+
+    console.print(f"  Latest version:  [bold]{latest}[/bold]")
+
+    from .version_check import _version_tuple
+    if _version_tuple(latest) <= _version_tuple(current):
+        ui.blank()
+        console.print("  [green]Already up to date.[/green]")
+        ui.blank()
         return
-    if s.healthy:
-        ui.header("Daemon healthy", state="ok",
-                  subtitle=f"via {s.method}")
-    elif s.running:
-        ui.header("Daemon running but unhealthy", state="warn",
-                  subtitle=f"via {s.method}")
+
+    if check_only:
+        ui.blank()
+        console.print(
+            f"  [yellow]⬆ Update available:[/yellow] {current} → {latest}  "
+            f"[dim](run: skein update)[/dim]"
+        )
+        ui.blank()
+        return
+
+    # Detect install method from the binary path and environment.
+    import shutil
+    skein_bin = shutil.which("skein") or sys.executable
+    skein_path = Path(skein_bin).resolve()
+
+    # Check for editable / dev install (source tree).
+    is_editable = False
+    try:
+        import importlib.metadata as _meta
+        dist = _meta.distribution("skn")
+        direct_url = json.loads(dist.read_text("direct_url.json") or "{}")
+        is_editable = direct_url.get("dir_info", {}).get("editable", False)
+    except Exception:
+        pass
+
+    if is_editable:
+        ui.blank()
+        console.print(
+            "  [yellow]⚠[/yellow] Skein is installed in editable/dev mode.\n"
+            "  Pull the latest changes and restart the daemon:\n"
+            "\n"
+            "    [bold]git pull && skein restart[/bold]\n"
+            "\n"
+            "  If you installed via the TCC workaround (macOS) also run:\n"
+            "    [bold]skein down && rm -rf ~/.skein/source && skein up[/bold]"
+        )
+        ui.blank()
+        return
+
+    # Detect pipx: binary lives inside a pipx venv
+    #   ~/.local/pipx/venvs/skn/bin/skein  or  ~/Library/Application Support/pipx/…
+    is_pipx = "pipx" in str(skein_path) or "pipx" in os.environ.get("PIPX_HOME", "")
+    if not is_pipx:
+        # Secondary check: pipx creates a link under ~/.local/bin
+        try:
+            resolved = skein_path.resolve()
+            is_pipx = "pipx" in str(resolved)
+        except Exception:
+            pass
+
+    # Detect uv tool: binary lives inside ~/.local/share/uv/tools/skn/
+    is_uv_tool = "uv" in str(skein_path) and "tools" in str(skein_path)
+    if not is_uv_tool:
+        try:
+            is_uv_tool = "uv" in str(skein_path.resolve()) and "tools" in str(skein_path.resolve())
+        except Exception:
+            pass
+
+    if is_pipx:
+        upgrade_cmd = ["pipx", "upgrade", "skn"]
+    elif is_uv_tool:
+        upgrade_cmd = ["uv", "tool", "upgrade", "skn"]
     else:
-        ui.header("Daemon stopped", state="off")
-        return
-    rows = []
-    if s.method:
-        rows.append(("Method", s.method))
-    if s.pid:
-        rows.append(("PID", str(s.pid)))
-    if s.base_url:
-        rows.append(("URL", f"[dim]{s.base_url}[/dim]"))
-    ui.fields(rows)
+        # Fallback: pip install --upgrade in the same Python that's running
+        upgrade_cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "skn"]
+
+    ui.blank()
+    ui.step(f"Upgrading skn → {latest}", detail=" ".join(upgrade_cmd), state="ok")
+    ui.blank()
+
+    try:
+        result = subprocess.run(upgrade_cmd, capture_output=False, text=True)
+        if result.returncode != 0:
+            err_console.print(
+                f"  [red]✗[/red] Upgrade command exited {result.returncode}."
+            )
+            sys.exit(result.returncode)
+    except FileNotFoundError as exc:
+        err_console.print(f"  [red]✗[/red] Command not found: {exc}")
+        sys.exit(1)
+
+    # Invalidate the update-check cache so next `skein status` shows up to date.
+    try:
+        from .version_check import _save_cache
+        _save_cache(latest)
+    except Exception:
+        pass
+
+    ui.blank()
+    ui.step(f"Upgraded to {latest}", state="ok")
+
+    # Restart the daemon so it picks up the new code.
+    from .daemon import restart as do_restart
+    restart_status = do_restart()
+    if restart_status.healthy:
+        ui.step("Daemon restarted", detail=f"via {restart_status.method}", state="ok")
+    else:
+        ui.step(
+            "Daemon restart failed",
+            detail="run `skein restart` manually",
+            state="warn",
+        )
     ui.blank()
 
 
-@daemon_grp.command("logs")
-@click.option("--err/--out", default=False, help="Show stderr instead of stdout.")
-@click.option("-n", "n", default=50, type=int, show_default=True,
-              help="Number of trailing lines.")
-def daemon_logs(err: bool, n: int) -> None:
-    """Tail the daemon log."""
-    from .daemon import DAEMON_LOG_DIR
-    log_file = DAEMON_LOG_DIR / ("daemon.err" if err else "daemon.out")
-    if not log_file.exists():
-        console.print(f"[dim]No log file at {log_file}[/dim]")
+# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -
+# Helpers used by visible commands (hoisted out of ADR-002 deletion
+# spans during iter 33 phase B).
+# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -# -
+
+def _render_clients_table(connected_ids: set) -> tuple:
+    """Build (rows, detected_clients) where each row is suitable for the
+    interactive picker."""
+    from . import clients as clients_mod
+    detected = clients_mod.detect_all()
+    rows = []
+    for entry in detected:
+        if not entry["detected"]:
+            continue
+        rows.append({
+            "id": entry["id"],
+            "name": entry["display_name"],
+            "note": entry["note"],
+            "connected": entry["id"] in connected_ids,
+        })
+    return rows, detected
+
+
+def _disconnect_impl(client_id: Optional[str], all_connected: bool) -> None:
+    """Remove Skein from one or all connected LLM tools.
+
+    \b
+    Forms:
+      skein disconnect cursor    surgically remove skein from cursor configs
+      skein disconnect --all     disconnect everything
+    """
+    from . import clients as clients_mod
+    from . import connections as conns
+    from .sync import disconnect_client
+
+    from . import ui
+
+    if not client_id and not all_connected:
+        err_console.print(
+            f"  {ui.mark('err')} Pass a client id (e.g. [cyan]cursor[/cyan]) "
+            "or [bold]--all[/bold]."
+        )
+        connected = conns.get_connected_ids()
+        if connected:
+            ui.hint(f"Currently connected: {', '.join(connected)}")
+        sys.exit(1)
+
+    if all_connected:
+        targets = conns.get_connected_ids()
+        if not targets:
+            ui.hint("No clients are currently connected.")
+            return
+    else:
+        if clients_mod.get_client(client_id) is None:
+            err_console.print(
+                f"  {ui.mark('err')} Unknown client id: [cyan]{client_id}[/cyan]"
+            )
+            ui.hint(f"Known ids: {', '.join(clients_mod.all_ids())}")
+            sys.exit(1)
+        if not conns.is_connected(client_id):
+            ui.hint(f"[cyan]{client_id}[/cyan] is not currently connected.")
+            return
+        targets = [client_id]
+
+    ui.blank()
+    for cid in targets:
+        try:
+            modified = disconnect_client(cid)
+            ui.step(f"Disconnected [cyan]{cid}[/cyan]", state="ok")
+            for p in modified:
+                ui.bullet(f"[dim]{ui.home_relative(p)}[/dim]",
+                          indent=6, mark_str="└─")
+        except Exception as e:
+            err_console.print(f"  {ui.mark('err')} {cid}: {e}")
+    ui.blank()
+
+
+def _since_impl(
+    since_arg: str,
+    scope: Optional[str],
+    types: tuple,
+    exclude_tool: Optional[str],
+    limit: int,
+    output_json: bool,
+) -> None:
+    """List fragments created after a timestamp — cross-tool "what changed?" feed.
+
+    \b
+    Examples:
+        skein since 1h
+        skein since 2d --exclude-tool claude_code
+        skein since 2026-05-12 --type decision --limit 20
+    """
+    iso = _parse_since(since_arg)
+    scope_handle = _resolve_scope(scope)
+
+    params: dict = {
+        "scope": scope_handle,
+        "since": iso,
+        "limit": limit,
+    }
+    if exclude_tool:
+        params["exclude_tool"] = exclude_tool
+    if types:
+        # The GET /v1/fragments endpoint takes a single `type` filter; if the
+        # user passes multiple, query each and merge in display order. Rare
+        # path so the extra roundtrip is fine.
+        all_rows: list = []
+        seen_ids: set = set()
+        with _client() as client:
+            _require_running(client)
+            for t in types:
+                p = dict(params)
+                p["type"] = t
+                resp = client.get("/v1/fragments", params=p)
+                if resp.status_code != 200:
+                    err_console.print(f"[red]✗[/red] Error {resp.status_code}: {resp.text}")
+                    sys.exit(1)
+                for row in resp.json():
+                    if row["id"] not in seen_ids:
+                        seen_ids.add(row["id"])
+                        all_rows.append(row)
+        # Re-sort merged set by created_at DESC and trim.
+        all_rows.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+        rows = all_rows[:limit]
+    else:
+        with _client() as client:
+            _require_running(client)
+            resp = client.get("/v1/fragments", params=params)
+        if resp.status_code != 200:
+            err_console.print(f"[red]✗[/red] Error {resp.status_code}: {resp.text}")
+            sys.exit(1)
+        rows = resp.json()
+
+    if output_json:
+        print(json.dumps(rows, indent=2))
         return
-    lines = log_file.read_text().splitlines()[-n:]
-    for line in lines:
-        console.print(line, highlight=False)
+
+    from . import ui
+    label = f"since {since_arg} → {iso}"
+    ui.section(label)
+    ui.blank()
+    if not rows:
+        suffix = f" (excluding {exclude_tool})" if exclude_tool else ""
+        ui.bullet(f"No new fragments in [cyan]{scope_handle}[/cyan]{suffix}.")
+        ui.blank()
+        return
+
+    for f in rows:
+        meta_parts = [f"[yellow]{f['type']}[/yellow]"]
+        tool = f.get("created_by_tool") or "?"
+        meta_parts.append(f"[cyan]{tool}[/cyan]")
+        if f.get("territory"):
+            meta_parts.append(f"[dim]{f['territory']}[/dim]")
+        if f.get("tags"):
+            meta_parts.append(f"[dim]#{' #'.join(f['tags'])}[/dim]")
+        console.print("  " + "  ".join(meta_parts))
+        # Show first line of content + truncated remainder hint.
+        content = f.get("content", "")
+        first_line = content.split("\n", 1)[0]
+        if len(first_line) > 100:
+            first_line = first_line[:97] + "..."
+        console.print(f"      {first_line}")
+        console.print(
+            f"      [dim]{f['id'][:8]} · {f['created_at'][:19]}[/dim]"
+        )
+        ui.blank()
+    console.print(
+        f"  [dim]{len(rows)} fragment{'s' if len(rows) != 1 else ''} "
+        f"in [cyan]{scope_handle}[/cyan][/dim]"
+    )
+    ui.blank()
 
 
-# ---------------------------------------------------------------------------
-# watch — foreground watcher process (spawned by skein up; not for humans)
-# ---------------------------------------------------------------------------
+def _doctor_clean() -> None:
+    """ADR-002: replace `skein gc` invocation. Delegates to the existing
+    gc handler so the cleanup heuristics live in one place — when `gc`
+    is eventually deleted, only this helper moves with it.
+    """
+    _gc_impl(yes=False, dry_run=False)
+
+
+def _doctor_reingest() -> None:
+    """ADR-002: replace `skein ingest .` invocation. Delegates to the
+    existing ingest handler with the conservative defaults a re-ingest
+    needs (no --reset, no --prune)."""
+    _ingest_impl(path=".", scope=None, source_root=None,
+                 chunk_lines=80, overlap_lines=10, include_exts=None,
+                 extra_excludes=(), max_bytes=None,
+                 prune=False, reset=False, dry_run=False, quiet=False)
+
+
+def _doctor_reindex_embeddings() -> None:
+    """Iter 32: re-embed every fragment under the active provider.
+
+    Legacy 768-dim fragments from the gemini-era return cos=0 from vector
+    search under the new fastembed 384-dim provider (they only reach
+    `recall` via BM25). This walks every non-stale fragment, recomputes the
+    embedding, and writes it back. Runs against the local DB directly — no
+    daemon roundtrip — so it's safe under launchd's TCC restrictions.
+    """
+    from . import ui
+    from .config import get_config
+    from .embeddings import bytes_to_vec, get_provider, vec_to_bytes
+    from .storage import Storage
+
+    cfg = get_config()
+    storage = Storage(cfg.db_path)
+    try:
+        provider = get_provider(cfg.embedding_provider)
+        target_dim = getattr(provider, "dimension", 0)
+        ui.section(f"Reindex embeddings → {cfg.embedding_provider} (dim={target_dim})")
+        ui.blank()
+
+        rows = storage._conn.execute(
+            "SELECT id, content, embedding FROM fragments "
+            "WHERE is_stale = 0 AND content IS NOT NULL AND content != ''",
+        ).fetchall()
+        total = len(rows)
+        if total == 0:
+            ui.step("Nothing to reindex", state="ok", detail="0 live fragments.")
+            return
+
+        ui.step(f"Reindexing {total} fragments", state="info")
+        reindexed = 0
+        already_ok = 0
+        failed = 0
+        mismatched = 0
+        for row in rows:
+            existing_dim = None
+            if row["embedding"]:
+                try:
+                    existing_dim = len(bytes_to_vec(row["embedding"]))
+                except Exception:
+                    existing_dim = None
+            if existing_dim == target_dim and existing_dim is not None:
+                already_ok += 1
+                continue
+            if existing_dim is not None and existing_dim != target_dim:
+                mismatched += 1
+            try:
+                vec = provider.embed_one(row["content"])
+                blob = vec_to_bytes(vec)
+                storage._conn.execute(
+                    "UPDATE fragments SET embedding = ? WHERE id = ?",
+                    (blob, row["id"]),
+                )
+                reindexed += 1
+            except Exception as e:
+                failed += 1
+                ui.hint(f"Failed {row['id'][:8]}…: {e}")
+        storage._conn.commit()
+        ui.blank()
+        ui.step(
+            f"Reindexed {reindexed}", state="ok",
+            detail=f"already aligned: {already_ok}, dimension-mismatched: "
+                   f"{mismatched}, failed: {failed}",
+        )
+        ui.hint("Restart the daemon (skein restart) so cached query "
+                "embeddings flush.")
+    finally:
+        try:
+            storage.close()
+        except Exception:
+            pass
+
+
+def _gc_impl(yes: bool, dry_run: bool) -> None:
+    """Find and remove junk scopes and useless fragments.
+
+    \b
+    What counts as junk:
+      • Scopes with 0 fragments AND 0 chunks (empty leftovers)
+      • Personal scopes named like the user's home dir (project:<homename>)
+      • Observation fragments that match `Edit on /path` / `Write on /path`
+        patterns (the iteration-11 noise pattern)
+      • Conversation fragments older than 30 days
+
+    The user reviews the proposed deletes before anything happens.
+    """
+    from . import ui
+    from .storage import Storage
+    cfg = _get_config()
+    storage = Storage(cfg.db_path)
+    try:
+        # 1. Empty scopes
+        empty_scopes = []
+        for scope in storage.list_scopes(limit=1000):
+            n_frag = storage.count_fragments_in_scope(scope.id, include_stale=True)
+            n_chunk = storage.count_chunks(scope.id)
+            if n_frag == 0 and n_chunk == 0:
+                empty_scopes.append(scope)
+
+        # 2. $HOME-named scope (the project:ameliomar leak)
+        home_scope_handle = f"project:{Path.home().name.lower()}"
+        home_scope = storage.get_scope(home_scope_handle)
+
+        # 3. Bare-tool-event observations (the iteration 11 leak pattern)
+        import re as _re
+        noise_pattern = _re.compile(
+            r"^(Edit|Write|MultiEdit|NotebookEdit) on `?[^`]+`?$"
+        )
+        noise_frags = []
+        for scope in storage.list_scopes(limit=1000):
+            for f in storage.list_fragments(scope_id=scope.id,
+                                            type_filter="observation",
+                                            include_stale=True, limit=10000):
+                if noise_pattern.match(f.content.strip()):
+                    noise_frags.append(f)
+
+        # 4. Conversation fragments older than 30 days
+        from datetime import datetime as _dt, timedelta, timezone as _tz
+        cutoff = (_dt.now(_tz.utc) - timedelta(days=30)).isoformat()
+        old_convo_frags = []
+        for scope in storage.list_scopes(limit=1000):
+            for f in storage.list_fragments(scope_id=scope.id,
+                                            type_filter="conversation",
+                                            include_stale=True, limit=10000):
+                if f.created_at < cutoff:
+                    old_convo_frags.append(f)
+
+        # ---- Report ----
+        ui.section("Skein garbage collection")
+        ui.blank()
+        ui.fields([
+            ("Empty scopes", str(len(empty_scopes))),
+            ("$HOME-name scope", "1" if home_scope else "0"),
+            ("Bare-tool observations", str(len(noise_frags))),
+            ("Old conversations", str(len(old_convo_frags))),
+        ], label_width=24)
+
+        total = (
+            len(empty_scopes) + (1 if home_scope else 0)
+            + len(noise_frags) + len(old_convo_frags)
+        )
+        if total == 0:
+            ui.blank()
+            ui.bullet("Nothing to clean. Database looks healthy.")
+            return
+
+        ui.blank()
+        if empty_scopes:
+            console.print("  [bold]Empty scopes:[/bold]")
+            for s in empty_scopes:
+                console.print(f"    [dim]·[/dim] [cyan]{s.handle}[/cyan]")
+        if home_scope:
+            console.print(
+                f"  [bold]$HOME scope:[/bold] "
+                f"[cyan]{home_scope.handle}[/cyan]"
+            )
+        if noise_frags:
+            console.print(
+                f"  [bold]Bare-tool observations:[/bold] {len(noise_frags)}"
+            )
+        if old_convo_frags:
+            console.print(
+                f"  [bold]Old conversations:[/bold] {len(old_convo_frags)}"
+            )
+
+        ui.blank()
+        if dry_run:
+            ui.hint("--dry-run: nothing deleted.")
+            return
+
+        if not yes and not click.confirm(
+            f"  Delete all {total} items?", default=False,
+        ):
+            ui.hint("Cancelled.")
+            return
+
+        # ---- Delete ----
+        ui.blank()
+        deleted_frags = 0
+        deleted_scopes = 0
+        for f in noise_frags:
+            storage._conn.execute("DELETE FROM fragments WHERE id = ?", (f.id,))
+            deleted_frags += 1
+        for f in old_convo_frags:
+            storage._conn.execute("DELETE FROM fragments WHERE id = ?", (f.id,))
+            deleted_frags += 1
+        if home_scope:
+            # Wipe its fragments first so the scope is truly empty
+            for f in storage.list_fragments(
+                scope_id=home_scope.id, include_stale=True, limit=100000,
+            ):
+                storage._conn.execute("DELETE FROM fragments WHERE id = ?", (f.id,))
+                deleted_frags += 1
+            storage._conn.execute("DELETE FROM scopes WHERE id = ?", (home_scope.id,))
+            deleted_scopes += 1
+        for s in empty_scopes:
+            storage._conn.execute("DELETE FROM scopes WHERE id = ?", (s.id,))
+            deleted_scopes += 1
+        storage._conn.commit()
+
+        ui.step(f"Deleted {deleted_scopes} scopes, {deleted_frags} fragments",
+                state="ok")
+        ui.hint(
+            "Run [bold]skein chunks delete-scope[/bold] for any scope "
+            "that had stale chunks; this command only touches metadata."
+        )
+    finally:
+        storage.close()
+
+
+def _ingest_impl(
+    path: str,
+    scope: Optional[str],
+    source_root: Optional[str],
+    chunk_lines: int,
+    overlap_lines: int,
+    include_exts: Optional[str],
+    extra_excludes: tuple,
+    max_bytes: Optional[int],
+    prune: bool,
+    reset: bool,
+    dry_run: bool,
+    quiet: bool,
+) -> None:
+    """Ingest a directory of code/docs into the chunks index for RAG.
+
+    \b
+    Examples:
+        skein ingest ~/Documents/myapp
+        skein ingest ./src --include .py,.md --scope project:myapp
+        skein ingest . --reset --prune        # full re-index
+        skein ingest . --dry-run              # see what would be done
+
+    \b
+    The chunks index is searched by:
+        skein search "query"
+        and the MCP `search_code` tool (called by Claude Code, Cursor, etc.).
+    """
+    from .config import get_config
+    from .embeddings import get_provider as _get_emb
+    from .ingest import (
+        MAX_FILE_BYTES,
+        ingest_directory,
+    )
+    from .models import IdentityCreate, ScopeCreate
+    from .storage import Storage
+
+    cfg = get_config()
+    scope_handle = _resolve_scope(scope)
+    repo_path = Path(path).resolve()
+    root_label = source_root or repo_path.name
+
+    storage = Storage(cfg.db_path)
+    try:
+        # Auto-create scope if missing (CLI runs without daemon)
+        scope_obj = storage.get_scope(scope_handle)
+        if not scope_obj:
+            owner = storage.get_or_create_identity(IdentityCreate(
+                handle=f"user:{cfg.bearer_token[:8] if cfg.bearer_token else 'cli'}",
+                type="user", name="local-user",
+            ))
+            scope_type = scope_handle.split(":", 1)[0] if ":" in scope_handle else "project"
+            if scope_type not in {"public", "org", "team", "project", "personal"}:
+                scope_type = "project"
+            scope_obj = storage.create_scope(ScopeCreate(
+                handle=scope_handle, type=scope_type,
+                name=scope_handle.split(":", 1)[-1], owner_id=owner.id,
+            ))
+            console.print(f"[dim]Auto-created scope {scope_handle}[/dim]")
+
+        if reset and not dry_run:
+            n = storage.delete_chunks_by_root(scope_obj.id, root_label)
+            if n:
+                console.print(f"[dim]Reset: deleted {n} existing chunks under '{root_label}'[/dim]")
+
+        # Embedding provider (best-effort; ingest still works without)
+        try:
+            provider = _get_emb(cfg.embedding_provider)
+        except Exception as e:
+            console.print(f"[yellow]⚠ Embedding provider unavailable ({e}); ingesting keyword-only.[/yellow]")
+            provider = None
+
+        # Parse include extensions
+        include_set = None
+        if include_exts:
+            include_set = {
+                ext if ext.startswith(".") else f".{ext}"
+                for ext in include_exts.split(",")
+            }
+
+        max_b = max_bytes if max_bytes is not None else MAX_FILE_BYTES
+
+        progress_cb = None
+        if not quiet:
+            def progress_cb(rel_path: str, stats):
+                console.print(
+                    f"  [dim]{stats.files_ingested:>4}[/dim] {rel_path}",
+                    highlight=False,
+                )
+
+        console.print(
+            f"[bold]Ingesting[/bold] {repo_path}\n"
+            f"  scope:  [cyan]{scope_handle}[/cyan]\n"
+            f"  root:   [cyan]{root_label}[/cyan]\n"
+            f"  embed:  {cfg.embedding_provider}{' (skipped — no provider)' if provider is None else ''}\n"
+            f"  chunks: {chunk_lines} lines / {overlap_lines} overlap\n"
+        )
+
+        stats = ingest_directory(
+            repo_path,
+            storage,
+            provider,
+            scope_id=scope_obj.id,
+            source_root=root_label,
+            chunk_lines=chunk_lines,
+            overlap_lines=overlap_lines,
+            include_exts=include_set,
+            extra_excludes=tuple(extra_excludes),
+            max_file_bytes=max_b,
+            prune_missing=prune,
+            dry_run=dry_run,
+            progress_cb=progress_cb,
+        )
+
+        # Summary
+        kb = stats.bytes_processed / 1024
+        body = (
+            f"  Files seen:       [bold]{stats.files_seen}[/bold]\n"
+            f"  Files ingested:   [bold]{stats.files_ingested}[/bold]\n"
+            f"  Files skipped:    {stats.files_skipped}\n"
+            f"  Chunks inserted:  [bold green]{stats.chunks_inserted}[/bold green]\n"
+            f"  Chunks updated:   [yellow]{stats.chunks_updated}[/yellow]\n"
+            f"  Chunks unchanged: {stats.chunks_unchanged}\n"
+            f"  Chunks pruned:    {stats.chunks_pruned}\n"
+            f"  Bytes processed:  {kb:.1f} KB"
+        )
+        if stats.errors:
+            body += f"\n\n[red]Errors ({len(stats.errors)}):[/red]"
+            for err in stats.errors[:10]:
+                body += f"\n  • {err}"
+            if len(stats.errors) > 10:
+                body += f"\n  … and {len(stats.errors) - 10} more"
+        from rich.panel import Panel
+        console.print(Panel(body, title="Ingest summary", expand=False))
+
+        if stats.skipped_paths and not quiet:
+            console.print(
+                f"[dim]Skipped {len(stats.skipped_paths)} paths "
+                f"(too large / non-utf8). First 5:[/dim]"
+            )
+            for s in stats.skipped_paths[:5]:
+                console.print(f"  [dim]• {s}[/dim]")
+    finally:
+        storage.close()
+
+
+
+
 
 @main.command(hidden=True)
 @click.argument("path", type=click.Path(exists=True, file_okay=False))
@@ -810,78 +1443,6 @@ def watch(path: str, scope: str, source_root: Optional[str], polling: bool) -> N
 # projects — registry of active project roots the daemon watches
 # ---------------------------------------------------------------------------
 
-@main.group(hidden=True)
-def projects() -> None:
-    """List or manage active project roots (auto-watched for live re-ingest)."""
-
-
-@projects.command("list")
-@click.option("--json", "output_json", is_flag=True, default=False)
-def projects_list(output_json: bool) -> None:
-    """Show every registered project and whether its watcher is running."""
-    from . import ui
-    from .projects import list_projects
-    from . import watcher_manager
-
-    items = list_projects()
-    if output_json:
-        out = []
-        for p in items:
-            d = p.to_dict()
-            d["watcher_running"] = watcher_manager.is_running(p)
-            out.append(d)
-        print(json.dumps(out, indent=2))
-        return
-    if not items:
-        ui.section("Active projects")
-        ui.blank()
-        ui.bullet("No projects registered.")
-        ui.hint("Run [bold]skein up[/bold] in a project directory to register one.")
-        return
-
-    ui.section(f"Active projects ({len(items)})")
-    ui.blank()
-    home = str(Path.home())
-    for p in items:
-        running = watcher_manager.is_running(p)
-        state = "ok" if running else "idle"
-        watch_label = "[green]watching[/green]" if running else "[dim]idle[/dim]"
-        last = (p.last_ingest or "—")[:19]
-        # Two-line per project: header line + dim metadata line
-        console.print(
-            f"  {ui.dot(state)}  [cyan]{p.scope}[/cyan]  "
-            f"[dim]·[/dim]  {watch_label}"
-        )
-        console.print(
-            f"     [dim]{p.root.replace(home, '~', 1)}[/dim]"
-            f"  [dim]·[/dim]  [dim]last ingest [/dim][yellow]{last}[/yellow]"
-        )
-        ui.blank()
-    n_run = sum(1 for p in items if watcher_manager.is_running(p))
-    ui.counter_line([
-        (n_run, "watching"),
-        (len(items) - n_run, "idle"),
-    ])
-
-
-@projects.command("remove")
-@click.argument("root_or_scope")
-def projects_remove(root_or_scope: str) -> None:
-    """Unregister a project so the daemon stops watching it."""
-    from .projects import remove_project
-    if remove_project(root_or_scope):
-        console.print(f"[green]✓[/green] Removed [cyan]{root_or_scope}[/cyan]")
-        console.print(
-            "[dim]Run [bold]skein restart[/bold] to apply (the daemon "
-            "starts watchers on startup).[/dim]"
-        )
-    else:
-        console.print(f"[yellow]⊘[/yellow] No project matched [cyan]{root_or_scope}[/cyan]")
-
-
-# ---------------------------------------------------------------------------
-# init
-# ---------------------------------------------------------------------------
 
 @main.command(hidden=True)
 @click.option("--db-path", default=None, help="Path to the SQLite database file.")
@@ -1023,6 +1584,17 @@ def serve(
         )
         sys.exit(1)
 
+    # Iter 35: refuse to start if another daemon already holds the
+    # single-instance lock. Catches the case where a second `skein serve
+    # --port N` would otherwise happily run in parallel (how the iter-30
+    # 8766 leftover ran alongside 8765 for three days). Exits code 0 on
+    # contention so launchd's KeepAlive=true doesn't loop.
+    from . import paths as _skein_paths
+    from . import single_instance as _single_instance
+    _lock_handle = _single_instance.acquire_or_exit(
+        _skein_paths.daemon_lock_file(), stderr=sys.stderr,
+    )
+
     # Iter 28 Windows port: when `skein serve` is launched by a Windows
     # Scheduled Task (`schtasks /Run`), there is no console attached and
     # nothing redirects stdout/stderr. macOS' launchd plist sets
@@ -1072,106 +1644,7 @@ def serve(
 # sync
 # ---------------------------------------------------------------------------
 
-@main.command(hidden=True)
-@click.option("--scope", default=None, help="Scope to render AGENTS.md from.")
-@click.option("--repo", default=None, type=click.Path(file_okay=False),
-              help="Project root dir (default: cwd).")
-@click.option("--dry-run", is_flag=True, default=False, help="Print what would be written.")
-def sync(scope: Optional[str], repo: Optional[str], dry_run: bool) -> None:
-    """Write MCP configs for all LLM clients + regenerate AGENTS.md.
 
-    \b
-    Configures: Claude Code, Cursor, VS Code/Copilot, Codex CLI,
-                Gemini CLI, opencode, Antigravity.
-    Writes:     <repo>/AGENTS.md, <repo>/CLAUDE.md
-    """
-    from .agents_md import render_agents_md
-    from .config import get_config
-    from .storage import Storage
-    from .sync import sync_all
-
-    cfg = get_config()
-    scope_handle = _resolve_scope(scope)
-    repo_path = Path(repo) if repo else Path.cwd()
-
-    # We need storage to render AGENTS.md — start a local connection
-    storage = Storage(cfg.db_path)
-
-    # Render AGENTS.md
-    existing_agents_md: Optional[str] = None
-    agents_md_path = repo_path / "AGENTS.md"
-    if agents_md_path.exists():
-        existing_agents_md = agents_md_path.read_text()
-    agents_md_content = render_agents_md(
-        scope_handle, storage,
-        daemon_url=cfg.base_url,
-        existing_content=existing_agents_md,
-    )
-    storage.close()
-
-    from . import connections as conns
-    connected = conns.get_connected_ids()
-
-    if dry_run:
-        console.print("[bold]Dry run — would write:[/bold]")
-        console.print(f"  AGENTS.md ({len(agents_md_content)} chars)")
-        console.print(f"  CLAUDE.md (one-line @AGENTS.md shim)")
-        if connected:
-            console.print(f"  MCP configs for: {', '.join(connected)}")
-        else:
-            console.print("  [dim]No clients connected — run skein connect first.[/dim]")
-        return
-
-    if not connected:
-        console.print(
-            "[yellow]⚠[/yellow] No LLM clients connected. "
-            "Run [bold]skein connect[/bold] to choose which tools "
-            "should share context."
-        )
-
-    result = sync_all(
-        daemon_url=cfg.base_url,
-        bearer_token=cfg.bearer_token,
-        scope_handle=scope_handle,
-        repo_path=repo_path,
-        agents_md_content=agents_md_content,
-        client_ids=connected,
-    )
-
-    if result.written:
-        console.print("[bold green]✓ Written:[/bold green]")
-        for item in result.written:
-            console.print(f"  {item}")
-    if result.skipped:
-        console.print("[bold yellow]⊘ Skipped:[/bold yellow]")
-        for item in result.skipped:
-            console.print(f"  {item}")
-    if result.errors:
-        console.print("[bold red]✗ Errors:[/bold red]")
-        for item in result.errors:
-            console.print(f"  {item}")
-
-
-# ---------------------------------------------------------------------------
-# connect / disconnect / clients — manage which LLM tools are wired to Skein
-# ---------------------------------------------------------------------------
-
-def _render_clients_table(connected_ids: set) -> tuple:
-    """Build (rows, detected_clients) where each row is suitable for the
-    interactive picker."""
-    from . import clients as clients_mod
-    detected = clients_mod.detect_all()
-    rows = []
-    for entry in detected:
-        if not entry["detected"]:
-            continue
-        rows.append({
-            "id": entry["id"],
-            "name": entry["display_name"],
-            "note": entry["note"],
-            "connected": entry["id"] in connected_ids,
-        })
-    return rows, detected
 
 
 @main.command()
@@ -1204,10 +1677,7 @@ def connect(
     # uninstall path stays consistent. disconnect() will be marked hidden
     # in this iter and deleted in a follow-up after a week of dogfooding.
     if do_remove:
-        ctx = click.Context(disconnect)
-        ctx.invoke(
-            disconnect, client_id=client_id, all_connected=all_detected,
-        )
+        _disconnect_impl(client_id=client_id, all_connected=all_detected)
         return
     from . import clients as clients_mod
     from . import connections as conns
@@ -1361,120 +1831,10 @@ def connect(
         console.print(f"  {ui.mark('skip')} [dim]{item}[/dim]")
 
 
-@main.command(hidden=True)
-@click.argument("client_id", required=False)
-@click.option("--all", "all_connected", is_flag=True, default=False,
-              help="Disconnect every currently connected client.")
-def disconnect(client_id: Optional[str], all_connected: bool) -> None:
-    """Remove Skein from one or all connected LLM tools.
-
-    \b
-    Forms:
-      skein disconnect cursor    surgically remove skein from cursor configs
-      skein disconnect --all     disconnect everything
-    """
-    from . import clients as clients_mod
-    from . import connections as conns
-    from .sync import disconnect_client
-
-    from . import ui
-
-    if not client_id and not all_connected:
-        err_console.print(
-            f"  {ui.mark('err')} Pass a client id (e.g. [cyan]cursor[/cyan]) "
-            "or [bold]--all[/bold]."
-        )
-        connected = conns.get_connected_ids()
-        if connected:
-            ui.hint(f"Currently connected: {', '.join(connected)}")
-        sys.exit(1)
-
-    if all_connected:
-        targets = conns.get_connected_ids()
-        if not targets:
-            ui.hint("No clients are currently connected.")
-            return
-    else:
-        if clients_mod.get_client(client_id) is None:
-            err_console.print(
-                f"  {ui.mark('err')} Unknown client id: [cyan]{client_id}[/cyan]"
-            )
-            ui.hint(f"Known ids: {', '.join(clients_mod.all_ids())}")
-            sys.exit(1)
-        if not conns.is_connected(client_id):
-            ui.hint(f"[cyan]{client_id}[/cyan] is not currently connected.")
-            return
-        targets = [client_id]
-
-    ui.blank()
-    for cid in targets:
-        try:
-            modified = disconnect_client(cid)
-            ui.step(f"Disconnected [cyan]{cid}[/cyan]", state="ok")
-            for p in modified:
-                ui.bullet(f"[dim]{ui.home_relative(p)}[/dim]",
-                          indent=6, mark_str="└─")
-        except Exception as e:
-            err_console.print(f"  {ui.mark('err')} {cid}: {e}")
-    ui.blank()
 
 
-@main.command("clients", hidden=True)
-@click.option("--json", "output_json", is_flag=True, default=False,
-              help="Emit machine-readable JSON.")
-def clients_cmd(output_json: bool) -> None:
-    """Show installed/connected status for every supported LLM client."""
-    from . import clients as clients_mod
-    from . import connections as conns
-    from . import ui
-
-    detected = clients_mod.detect_all()
-    connected_ids = set(conns.get_connected_ids())
-
-    if output_json:
-        import json as _json
-        out = [{**d, "connected": d["id"] in connected_ids} for d in detected]
-        click.echo(_json.dumps(out, indent=2))
-        return
-
-    rows = []
-    n_connected = 0
-    n_detected = 0
-    n_missing = 0
-    for d in detected:
-        is_connected = d["id"] in connected_ids
-        if is_connected:
-            state = "ok"
-            note = "connected"
-            n_connected += 1
-            n_detected += 1
-        elif d["detected"]:
-            state = "idle"
-            note = "available"
-            n_detected += 1
-        else:
-            state = "off"
-            note = "not installed"
-            n_missing += 1
-        rows.append((state, d["id"], d["display_name"], note))
-
-    ui.section("LLM clients")
-    ui.blank()
-    ui.status_list(rows)
-    ui.blank()
-    ui.counter_line([
-        (n_connected, "connected"),
-        (n_detected - n_connected, "available"),
-        (n_missing, "not installed"),
-    ])
-
-    if not connected_ids:
-        ui.hint("Run [bold]skein connect[/bold] to pick which tools should share context.")
 
 
-# ---------------------------------------------------------------------------
-# remember
-# ---------------------------------------------------------------------------
 
 @main.command(hidden=True)
 @click.argument("content")
@@ -1671,337 +2031,12 @@ def _parse_since(raw: str) -> str:
     )
 
 
-@main.command(hidden=True)
-@click.argument("since_arg")
-@click.option("--scope", default=None, help="Scope handle (default from config).")
-@click.option("--type", "types", multiple=True,
-              help="Filter by fragment type (repeatable).")
-@click.option("--exclude-tool",
-              help="Hide fragments whose created_by_tool equals this. "
-                   "Use to see what OTHER tools wrote (e.g. --exclude-tool claude_code).")
-@click.option("--limit", "-n", default=50, show_default=True)
-@click.option("--json", "output_json", is_flag=True, default=False)
-def since(
-    since_arg: str,
-    scope: Optional[str],
-    types: tuple,
-    exclude_tool: Optional[str],
-    limit: int,
-    output_json: bool,
-) -> None:
-    """List fragments created after a timestamp — cross-tool "what changed?" feed.
-
-    \b
-    Examples:
-        skein since 1h
-        skein since 2d --exclude-tool claude_code
-        skein since 2026-05-12 --type decision --limit 20
-    """
-    iso = _parse_since(since_arg)
-    scope_handle = _resolve_scope(scope)
-
-    params: dict = {
-        "scope": scope_handle,
-        "since": iso,
-        "limit": limit,
-    }
-    if exclude_tool:
-        params["exclude_tool"] = exclude_tool
-    if types:
-        # The GET /v1/fragments endpoint takes a single `type` filter; if the
-        # user passes multiple, query each and merge in display order. Rare
-        # path so the extra roundtrip is fine.
-        all_rows: list = []
-        seen_ids: set = set()
-        with _client() as client:
-            _require_running(client)
-            for t in types:
-                p = dict(params)
-                p["type"] = t
-                resp = client.get("/v1/fragments", params=p)
-                if resp.status_code != 200:
-                    err_console.print(f"[red]✗[/red] Error {resp.status_code}: {resp.text}")
-                    sys.exit(1)
-                for row in resp.json():
-                    if row["id"] not in seen_ids:
-                        seen_ids.add(row["id"])
-                        all_rows.append(row)
-        # Re-sort merged set by created_at DESC and trim.
-        all_rows.sort(key=lambda r: r.get("created_at", ""), reverse=True)
-        rows = all_rows[:limit]
-    else:
-        with _client() as client:
-            _require_running(client)
-            resp = client.get("/v1/fragments", params=params)
-        if resp.status_code != 200:
-            err_console.print(f"[red]✗[/red] Error {resp.status_code}: {resp.text}")
-            sys.exit(1)
-        rows = resp.json()
-
-    if output_json:
-        print(json.dumps(rows, indent=2))
-        return
-
-    from . import ui
-    label = f"since {since_arg} → {iso}"
-    ui.section(label)
-    ui.blank()
-    if not rows:
-        suffix = f" (excluding {exclude_tool})" if exclude_tool else ""
-        ui.bullet(f"No new fragments in [cyan]{scope_handle}[/cyan]{suffix}.")
-        ui.blank()
-        return
-
-    for f in rows:
-        meta_parts = [f"[yellow]{f['type']}[/yellow]"]
-        tool = f.get("created_by_tool") or "?"
-        meta_parts.append(f"[cyan]{tool}[/cyan]")
-        if f.get("territory"):
-            meta_parts.append(f"[dim]{f['territory']}[/dim]")
-        if f.get("tags"):
-            meta_parts.append(f"[dim]#{' #'.join(f['tags'])}[/dim]")
-        console.print("  " + "  ".join(meta_parts))
-        # Show first line of content + truncated remainder hint.
-        content = f.get("content", "")
-        first_line = content.split("\n", 1)[0]
-        if len(first_line) > 100:
-            first_line = first_line[:97] + "..."
-        console.print(f"      {first_line}")
-        console.print(
-            f"      [dim]{f['id'][:8]} · {f['created_at'][:19]}[/dim]"
-        )
-        ui.blank()
-    console.print(
-        f"  [dim]{len(rows)} fragment{'s' if len(rows) != 1 else ''} "
-        f"in [cyan]{scope_handle}[/cyan][/dim]"
-    )
-    ui.blank()
 
 
-# ---------------------------------------------------------------------------
-# note (alias: remember --type decision)
-# ---------------------------------------------------------------------------
-
-@main.command(hidden=True)
-@click.argument("content")
-@click.option("--scope", default=None)
-@click.option("--territory", "-t", default=None)
-@click.option("--alternatives", "-a", default=None,
-              help="What alternatives were considered.")
-@click.option("--rationale", "-r", default=None,
-              help="Why this decision was made.")
-@click.option("--tag", "-T", multiple=True)
-@click.option("--json", "output_json", is_flag=True, default=False)
-def note(
-    content: str,
-    scope: Optional[str],
-    territory: Optional[str],
-    alternatives: Optional[str],
-    rationale: Optional[str],
-    tag: tuple,
-    output_json: bool,
-) -> None:
-    """Record an architectural / technical decision.
-
-    \b
-    Example:
-        skein note "use Redis for session caching" \\
-            --alternatives "Memcached, in-memory dict" \\
-            --rationale "Redis has TTL support and persistence" \\
-            --territory backend/sessions
-    """
-    parts = [content]
-    if alternatives:
-        parts.append(f"\nAlternatives considered: {alternatives}")
-    if rationale:
-        parts.append(f"\nRationale: {rationale}")
-    full = "".join(parts)
-
-    cfg = _get_config()
-    scope_handle = _resolve_scope(scope)
-
-    payload: dict = {
-        "content": full,
-        "type": "decision",
-        "scope_id": scope_handle,
-        "owner_id": "",
-        "tags": list(tag),
-    }
-    if territory:
-        payload["territory"] = territory
-
-    with _client() as client:
-        _require_running(client)
-        resp = client.post("/v1/fragments", json=payload)
-
-    if resp.status_code == 201:
-        frag = resp.json()
-        if output_json:
-            print(json.dumps(frag, indent=2))
-        else:
-            console.print(
-                f"[green]✓[/green] Decision recorded "
-                f"[dim]{frag['id'][:8]}…[/dim]  {content[:60]}"
-            )
-    else:
-        err_console.print(f"[red]✗[/red] Error {resp.status_code}: {resp.text}")
-        sys.exit(1)
 
 
-# ---------------------------------------------------------------------------
-# lease
-# ---------------------------------------------------------------------------
-
-@main.command(hidden=True)
-@click.argument("glob")
-@click.option("--scope", default=None)
-@click.option("--ttl", default=300, show_default=True,
-              help="Lease duration in seconds.")
-@click.option("--reason", default=None)
-@click.option("--json", "output_json", is_flag=True, default=False)
-def lease(
-    glob: str,
-    scope: Optional[str],
-    ttl: int,
-    reason: Optional[str],
-    output_json: bool,
-) -> None:
-    """Acquire an advisory lease on a file-glob pattern.
-
-    \b
-    Example:
-        skein lease "backend/auth/**" --reason "refactoring auth middleware"
-    """
-    cfg = _get_config()
-    scope_handle = _resolve_scope(scope)
-
-    payload: dict = {
-        "scope_id": scope_handle,
-        "glob": glob,
-        "owner_id": "",
-        "ttl_seconds": ttl,
-    }
-    if reason:
-        payload["reason"] = reason
-
-    with _client() as client:
-        _require_running(client)
-        resp = client.post("/v1/leases", json=payload)
-
-    if resp.status_code == 201:
-        data = resp.json()
-        if output_json:
-            print(json.dumps(data, indent=2))
-        else:
-            console.print(
-                f"[green]✓[/green] Lease acquired [dim]{data['id'][:8]}…[/dim]\n"
-                f"  glob:    {data['glob']}\n"
-                f"  expires: {data.get('expires_at', '—')}"
-            )
-    elif resp.status_code == 409:
-        err = resp.json().get("detail", {})
-        console.print(
-            f"[red]✗ Lease conflict[/red] on '{glob}'\n"
-            f"  Held by: [dim]{err.get('held_by', '?')[:8]}…[/dim]\n"
-            f"  Expires: {err.get('expires_at', '?')}"
-        )
-        sys.exit(1)
-    else:
-        err_console.print(f"[red]✗[/red] Error {resp.status_code}: {resp.text}")
-        sys.exit(1)
 
 
-# ---------------------------------------------------------------------------
-# leases
-# ---------------------------------------------------------------------------
-
-@main.command(hidden=True)
-@click.option("--scope", default=None)
-@click.option("--all", "show_all", is_flag=True, default=False,
-              help="Show expired leases too.")
-@click.option("--json", "output_json", is_flag=True, default=False)
-def leases(
-    scope: Optional[str],
-    show_all: bool,
-    output_json: bool,
-) -> None:
-    """List active advisory leases."""
-    cfg = _get_config()
-    scope_handle = _resolve_scope(scope)
-
-    params: dict = {"active_only": not show_all}
-    if scope_handle:
-        params["scope"] = scope_handle
-
-    with _client() as client:
-        _require_running(client)
-        resp = client.get("/v1/leases", params=params)
-
-    if resp.status_code != 200:
-        err_console.print(f"[red]✗[/red] Error {resp.status_code}: {resp.text}")
-        sys.exit(1)
-
-    data = resp.json()
-    if output_json:
-        print(json.dumps(data, indent=2))
-        return
-
-    if not data:
-        console.print("[dim]No active leases.[/dim]")
-        return
-
-    from rich.table import Table
-    table = Table(title=f"Active leases ({len(data)})")
-    table.add_column("ID", style="dim")
-    table.add_column("Glob", style="cyan")
-    table.add_column("Owner", style="green")
-    table.add_column("Reason")
-    table.add_column("Expires", style="yellow")
-
-    for item in data:
-        table.add_row(
-            item["id"][:8] + "…",
-            item["glob"],
-            item["owner_id"][:8] + "…",
-            item.get("reason") or "—",
-            item.get("expires_at", "—")[:19],
-        )
-    console.print(table)
-
-
-# ---------------------------------------------------------------------------
-# agents-md
-# ---------------------------------------------------------------------------
-
-@main.command("agents-md", hidden=True)
-@click.option("--scope", default=None)
-@click.option("--write", "write_path", default=None, type=click.Path(),
-              help="Write to this file instead of stdout.")
-def agents_md_cmd(scope: Optional[str], write_path: Optional[str]) -> None:
-    """Print or write the rendered AGENTS.md for a scope."""
-    from .agents_md import render_agents_md
-    from .config import get_config
-    from .storage import Storage
-
-    cfg = get_config()
-    scope_handle = _resolve_scope(scope)
-    storage = Storage(cfg.db_path)
-
-    try:
-        content = render_agents_md(scope_handle, storage, daemon_url=cfg.base_url)
-    finally:
-        storage.close()
-
-    if write_path:
-        Path(write_path).write_text(content)
-        console.print(f"[green]✓[/green] Written to {write_path}")
-    else:
-        print(content)
-
-
-# ---------------------------------------------------------------------------
-# status
-# ---------------------------------------------------------------------------
 
 @main.command()
 @click.option("--json", "output_json", is_flag=True, default=False)
@@ -2095,6 +2130,15 @@ def status(output_json: bool) -> None:
             console.print(f"    {marker}  {c['label']:18}  [dim]{tag}[/dim]")
         ui.blank()
 
+    try:
+        from .version_check import update_banner
+        banner = update_banner()
+        if banner:
+            console.print(f"  {banner}")
+            ui.blank()
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # briefing — single-call project snapshot (LLM / human-friendly)
@@ -2122,11 +2166,8 @@ def briefing(scope: Optional[str], since_arg: Optional[str], output_json: bool) 
     # display stays consistent. since() will be marked hidden in this iter
     # and deleted in a follow-up after a week of dogfooding.
     if since_arg is not None:
-        ctx = click.Context(since)
-        ctx.invoke(
-            since, since_arg=since_arg, scope=scope, types=(),
-            exclude_tool=None, limit=50, output_json=output_json,
-        )
+        _since_impl(since_arg=since_arg, scope=scope, types=(),
+                    exclude_tool=None, limit=50, output_json=output_json)
         return
     from . import ui
     scope_handle = _resolve_scope(scope)
@@ -2200,365 +2241,15 @@ def briefing(scope: Optional[str], since_arg: Optional[str], output_json: bool) 
 # preview — show exactly what gets injected into agent prompts
 # ---------------------------------------------------------------------------
 
-@main.command(hidden=True)
-@click.argument("query", required=False)
-@click.option("--scope", default=None, help="Override the auto-detected scope.")
-@click.option("--session-start", is_flag=True, default=False,
-              help="Preview the SessionStart injection (no query needed).")
-def preview(query: Optional[str], scope: Optional[str], session_start: bool) -> None:
-    """Show the EXACT markdown that Skein would inject into an agent prompt.
-
-    \b
-    Two modes:
-      skein preview "<query>"            — UserPromptSubmit-style injection
-      skein preview --session-start       — SessionStart injection
-
-    What you see here is what the AI sees on every prompt. If it looks like
-    noise, that's signal: tighten MIN_INJECT_SCORE or run `skein gc`.
-    """
-    from . import hooks as hooks_mod
-    from . import ui
-    from .storage import Storage
-
-    if not query and not session_start:
-        err_console.print(
-            f"  {ui.mark('err')} Pass a query, or use --session-start."
-        )
-        sys.exit(1)
-
-    cfg = _get_config()
-    scope_handle = _resolve_scope(scope)
-    storage = Storage(cfg.db_path)
-
-    try:
-        scope_obj = storage.get_scope(scope_handle)
-        if scope_obj is None:
-            ui.section("Skein preview")
-            ui.blank()
-            ui.bullet(f"Scope [cyan]{scope_handle}[/cyan] does not exist yet.")
-            ui.hint(
-                "Skein would inject NOTHING for this scope (no fragments). "
-                "Run [bold]skein remember[/bold] or wait for hooks to populate it."
-            )
-            return
-
-        if session_start:
-            text = _preview_session_start(storage, scope_obj, scope_handle)
-        else:
-            text = _preview_user_prompt(
-                storage, scope_obj, scope_handle, query, cfg,
-            )
-    finally:
-        storage.close()
-
-    ui.section(f"Skein injection preview — `{scope_handle}`")
-    ui.blank()
-    if not text.strip():
-        ui.bullet("[dim]Nothing would be injected.[/dim]")
-        ui.hint(
-            "Either no fragments matched, or every match was below "
-            f"the noise floor (score >= {hooks_mod.MIN_INJECT_SCORE})."
-        )
-        return
-    # Render the actual markdown the AI would see, indented for readability.
-    for line in text.splitlines():
-        console.print(f"  [dim]│[/dim] {line}", highlight=False)
-    ui.blank()
 
 
-def _preview_session_start(storage, scope_obj, scope_handle: str) -> str:
-    from . import hooks as hooks_mod
-    signal_frags = []
-    for ftype in hooks_mod.SECTION_ORDER:
-        if ftype not in hooks_mod.SIGNAL_TYPES:
-            continue
-        signal_frags.extend(storage.list_fragments(
-            scope_id=scope_obj.id, type_filter=ftype,
-            include_stale=False, limit=20,
-        ))
-    signal_frags.sort(
-        key=lambda f: (hooks_mod.SECTION_ORDER.index(f.type), -hooks_mod._ts(f.updated_at)),
-    )
-    seen, deduped = set(), []
-    for f in signal_frags:
-        key = f.content.strip().lower()[:200]
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(f)
-    top = deduped[:hooks_mod.SESSION_START_LIMIT]
-    if not top:
-        return ""
-    return hooks_mod._render_grouped(scope_handle, top, header="Skein context")
 
 
-def _preview_user_prompt(storage, scope_obj, scope_handle: str,
-                         prompt: str, cfg) -> str:
-    from . import hooks as hooks_mod
-    from .embeddings import get_provider as gp
-    from .models import RecallRequest
-    from .retrieval import recall as do_recall
-
-    if storage.count_fragments_in_scope(scope_obj.id) == 0:
-        return ""
-
-    try:
-        provider = gp(cfg.embedding_provider)
-    except Exception:
-        return ""
-
-    req = RecallRequest(query=prompt[:500], scope=scope_handle,
-                        limit=hooks_mod.USER_PROMPT_LIMIT)
-    resp = do_recall(req, storage, provider)
-
-    hits = [r for r in resp.results if r.score >= hooks_mod.MIN_INJECT_SCORE]
-    seen, deduped = set(), []
-    for r in hits:
-        key = r.fragment.content.strip().lower()[:200]
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(r)
-    OBS_FLOOR = 0.04
-    deduped = [
-        r for r in deduped
-        if r.fragment.type in hooks_mod.SIGNAL_TYPES or r.score >= OBS_FLOOR
-    ]
-    if not deduped:
-        return ""
-
-    frags = [r.fragment for r in deduped]
-    return hooks_mod._render_grouped(
-        scope_handle, frags,
-        header=f"Skein recall — `{prompt[:60]}…`",
-    )
 
 
-# ---------------------------------------------------------------------------
-# gc — interactive cleanup of junk scopes and fragments
-# ---------------------------------------------------------------------------
-
-@main.command(hidden=True)
-@click.option("--yes", "-y", is_flag=True, default=False,
-              help="Skip confirmation prompts (CI use).")
-@click.option("--dry-run", is_flag=True, default=False,
-              help="Show what would be deleted without doing it.")
-def gc(yes: bool, dry_run: bool) -> None:
-    """Find and remove junk scopes and useless fragments.
-
-    \b
-    What counts as junk:
-      • Scopes with 0 fragments AND 0 chunks (empty leftovers)
-      • Personal scopes named like the user's home dir (project:<homename>)
-      • Observation fragments that match `Edit on /path` / `Write on /path`
-        patterns (the iteration-11 noise pattern)
-      • Conversation fragments older than 30 days
-
-    The user reviews the proposed deletes before anything happens.
-    """
-    from . import ui
-    from .storage import Storage
-    cfg = _get_config()
-    storage = Storage(cfg.db_path)
-    try:
-        # 1. Empty scopes
-        empty_scopes = []
-        for scope in storage.list_scopes(limit=1000):
-            n_frag = storage.count_fragments_in_scope(scope.id, include_stale=True)
-            n_chunk = storage.count_chunks(scope.id)
-            if n_frag == 0 and n_chunk == 0:
-                empty_scopes.append(scope)
-
-        # 2. $HOME-named scope (the project:ameliomar leak)
-        home_scope_handle = f"project:{Path.home().name.lower()}"
-        home_scope = storage.get_scope(home_scope_handle)
-
-        # 3. Bare-tool-event observations (the iteration 11 leak pattern)
-        import re as _re
-        noise_pattern = _re.compile(
-            r"^(Edit|Write|MultiEdit|NotebookEdit) on `?[^`]+`?$"
-        )
-        noise_frags = []
-        for scope in storage.list_scopes(limit=1000):
-            for f in storage.list_fragments(scope_id=scope.id,
-                                            type_filter="observation",
-                                            include_stale=True, limit=10000):
-                if noise_pattern.match(f.content.strip()):
-                    noise_frags.append(f)
-
-        # 4. Conversation fragments older than 30 days
-        from datetime import datetime as _dt, timedelta, timezone as _tz
-        cutoff = (_dt.now(_tz.utc) - timedelta(days=30)).isoformat()
-        old_convo_frags = []
-        for scope in storage.list_scopes(limit=1000):
-            for f in storage.list_fragments(scope_id=scope.id,
-                                            type_filter="conversation",
-                                            include_stale=True, limit=10000):
-                if f.created_at < cutoff:
-                    old_convo_frags.append(f)
-
-        # ---- Report ----
-        ui.section("Skein garbage collection")
-        ui.blank()
-        ui.fields([
-            ("Empty scopes", str(len(empty_scopes))),
-            ("$HOME-name scope", "1" if home_scope else "0"),
-            ("Bare-tool observations", str(len(noise_frags))),
-            ("Old conversations", str(len(old_convo_frags))),
-        ], label_width=24)
-
-        total = (
-            len(empty_scopes) + (1 if home_scope else 0)
-            + len(noise_frags) + len(old_convo_frags)
-        )
-        if total == 0:
-            ui.blank()
-            ui.bullet("Nothing to clean. Database looks healthy.")
-            return
-
-        ui.blank()
-        if empty_scopes:
-            console.print("  [bold]Empty scopes:[/bold]")
-            for s in empty_scopes:
-                console.print(f"    [dim]·[/dim] [cyan]{s.handle}[/cyan]")
-        if home_scope:
-            console.print(
-                f"  [bold]$HOME scope:[/bold] "
-                f"[cyan]{home_scope.handle}[/cyan]"
-            )
-        if noise_frags:
-            console.print(
-                f"  [bold]Bare-tool observations:[/bold] {len(noise_frags)}"
-            )
-        if old_convo_frags:
-            console.print(
-                f"  [bold]Old conversations:[/bold] {len(old_convo_frags)}"
-            )
-
-        ui.blank()
-        if dry_run:
-            ui.hint("--dry-run: nothing deleted.")
-            return
-
-        if not yes and not click.confirm(
-            f"  Delete all {total} items?", default=False,
-        ):
-            ui.hint("Cancelled.")
-            return
-
-        # ---- Delete ----
-        ui.blank()
-        deleted_frags = 0
-        deleted_scopes = 0
-        for f in noise_frags:
-            storage._conn.execute("DELETE FROM fragments WHERE id = ?", (f.id,))
-            deleted_frags += 1
-        for f in old_convo_frags:
-            storage._conn.execute("DELETE FROM fragments WHERE id = ?", (f.id,))
-            deleted_frags += 1
-        if home_scope:
-            # Wipe its fragments first so the scope is truly empty
-            for f in storage.list_fragments(
-                scope_id=home_scope.id, include_stale=True, limit=100000,
-            ):
-                storage._conn.execute("DELETE FROM fragments WHERE id = ?", (f.id,))
-                deleted_frags += 1
-            storage._conn.execute("DELETE FROM scopes WHERE id = ?", (home_scope.id,))
-            deleted_scopes += 1
-        for s in empty_scopes:
-            storage._conn.execute("DELETE FROM scopes WHERE id = ?", (s.id,))
-            deleted_scopes += 1
-        storage._conn.commit()
-
-        ui.step(f"Deleted {deleted_scopes} scopes, {deleted_frags} fragments",
-                state="ok")
-        ui.hint(
-            "Run [bold]skein chunks delete-scope[/bold] for any scope "
-            "that had stale chunks; this command only touches metadata."
-        )
-    finally:
-        storage.close()
 
 
-# ---------------------------------------------------------------------------
-# events — recent activity stream (commits + recently-stored fragments)
-# ---------------------------------------------------------------------------
 
-@main.command(hidden=True)
-@click.option("--scope", default=None, help="Filter by scope.")
-@click.option("-n", "--limit", default=20, show_default=True, type=int)
-@click.option("--json", "output_json", is_flag=True, default=False)
-def events(scope: Optional[str], limit: int, output_json: bool) -> None:
-    """Show the latest activity on the context bus — what each agent stored,
-    when, and in which scope. Quickest way to audit what the AI is doing
-    behind the user's back.
-    """
-    from . import ui
-    from .storage import Storage
-    cfg = _get_config()
-    scope_handle = scope or _resolve_scope(None)
-    storage = Storage(cfg.db_path)
-    try:
-        scope_obj = storage.get_scope(scope_handle)
-        if scope_obj is None:
-            ui.section("Skein events")
-            ui.blank()
-            ui.bullet(f"Scope [cyan]{scope_handle}[/cyan] does not exist.")
-            return
-
-        # Recent fragments (decisions / preferences / requirements first)
-        all_frags = storage.list_fragments(
-            scope_id=scope_obj.id, include_stale=False, limit=limit * 2,
-        )
-        all_frags.sort(key=lambda f: f.created_at, reverse=True)
-        all_frags = all_frags[:limit]
-
-        if output_json:
-            print(json.dumps([f.model_dump() for f in all_frags], indent=2, default=str))
-            return
-
-        ui.section(f"Recent activity — `{scope_handle}`")
-        ui.blank()
-        if not all_frags:
-            ui.bullet("[dim]No fragments yet.[/dim]")
-            return
-        for f in all_frags:
-            preview_text = f.content if len(f.content) <= 80 else f.content[:77] + "…"
-            console.print(
-                f"  [dim]{f.created_at[:16]}[/dim]  "
-                f"[yellow]{f.type:<11}[/yellow]  "
-                f"{preview_text}"
-            )
-        ui.blank()
-        ui.hint(f"{len(all_frags)} fragments shown. Use --json for full content.")
-    finally:
-        storage.close()
-
-
-# ---------------------------------------------------------------------------
-# doctor
-# ---------------------------------------------------------------------------
-
-def _doctor_clean() -> None:
-    """ADR-002: replace `skein gc` invocation. Delegates to the existing
-    gc handler so the cleanup heuristics live in one place — when `gc`
-    is eventually deleted, only this helper moves with it.
-    """
-    ctx = click.Context(gc)
-    ctx.invoke(gc, yes=False, dry_run=False)
-
-
-def _doctor_reingest() -> None:
-    """ADR-002: replace `skein ingest .` invocation. Delegates to the
-    existing ingest handler with the conservative defaults a re-ingest
-    needs (no --reset, no --prune)."""
-    ctx = click.Context(ingest)
-    ctx.invoke(
-        ingest, path=".", scope=None, source_root=None,
-        chunk_lines=80, overlap_lines=10, include_exts=None,
-        extra_excludes=(), max_bytes=None,
-        prune=False, reset=False, dry_run=False, quiet=False,
-    )
 
 
 @main.command()
@@ -2570,7 +2261,13 @@ def _doctor_reingest() -> None:
 @click.option("--reingest", "do_reingest", is_flag=True, default=False,
               help="Re-ingest the codebase at the current working directory. "
                    "Replaces `skein ingest`.")
-def doctor(show_perf: bool, do_clean: bool, do_reingest: bool) -> None:
+@click.option("--reindex-embeddings", "do_reindex_embeddings", is_flag=True,
+              default=False,
+              help="Re-embed every fragment under the active provider — "
+                   "fixes legacy fragments that return cos=0 after an "
+                   "embedding-provider change.")
+def doctor(show_perf: bool, do_clean: bool, do_reingest: bool,
+           do_reindex_embeddings: bool) -> None:
     """Deep diagnostic: daemon, scopes, fragments, chunks, value distribution.
 
     Subsumes (per ADR-002) the old `daemon status`, `daemon logs`, `events`
@@ -2596,6 +2293,9 @@ def doctor(show_perf: bool, do_clean: bool, do_reingest: bool) -> None:
         return
     if do_reingest:
         _doctor_reingest()
+        return
+    if do_reindex_embeddings:
+        _doctor_reindex_embeddings()
         return
     import shutil
     from . import ui
@@ -2763,14 +2463,134 @@ def doctor(show_perf: bool, do_clean: bool, do_reingest: bool) -> None:
                     ),
                     state="ok",
                 )
+                # Oldest pending tells you whether the queue is stuck.
+                oldest_pending = ""
+                try:
+                    row = st._conn.execute(
+                        """SELECT
+                             CAST((julianday('now') - julianday(MIN(created_at))) AS INTEGER) AS d
+                           FROM extraction_candidates
+                           WHERE status = 'pending'"""
+                    ).fetchone()
+                    if row and row["d"] is not None:
+                        oldest_pending = f" (oldest {row['d']}d)"
+                except Exception:
+                    pass
                 ui.step(
                     "Inbox",
                     detail=(
-                        f"{inbox} pending · "
+                        f"{inbox} pending{oldest_pending} · "
                         f"{approved} approved · {rejected} rejected (auto-sweep handles these)"
                     ),
                     state="ok" if inbox < 200 else "warn",
                 )
+
+                # --- Iter 34: "gets-better" indicators ---
+                # Derived purely from existing columns — no new tables.
+                # Three signals that tell the user whether usage is
+                # compounding into better recall over time.
+                try:
+                    # Recall coverage: of the live fragments, how many
+                    # have been touched by at least one recall? Median
+                    # recall_hits across the touched set.
+                    cov = st._conn.execute(
+                        """SELECT
+                             SUM(CASE WHEN recall_hits > 0 THEN 1 ELSE 0 END) AS touched,
+                             COUNT(*) AS live
+                           FROM fragments
+                           WHERE is_stale = 0"""
+                    ).fetchone()
+                    touched = cov["touched"] or 0
+                    live = cov["live"] or 0
+                    coverage_pct = (
+                        (100.0 * touched / live) if live else 0.0
+                    )
+                    # Cheap median: order by recall_hits, pick middle row.
+                    median_hits = 0
+                    if touched:
+                        mh_row = st._conn.execute(
+                            """SELECT recall_hits FROM fragments
+                               WHERE is_stale = 0 AND recall_hits > 0
+                               ORDER BY recall_hits
+                               LIMIT 1 OFFSET ?""",
+                            (max(0, touched // 2),),
+                        ).fetchone()
+                        if mh_row:
+                            median_hits = int(mh_row["recall_hits"] or 0)
+                    # Recalled in the last 7d — how active is the bus?
+                    recent = st._conn.execute(
+                        """SELECT COUNT(*) AS c FROM fragments
+                           WHERE is_stale = 0
+                             AND last_recalled_at IS NOT NULL
+                             AND last_recalled_at >= datetime('now', '-7 days')"""
+                    ).fetchone()
+                    recent_recalled = int(recent["c"] or 0)
+                    ui.step(
+                        "Recall coverage (7d)",
+                        detail=(
+                            f"{touched}/{live} fragments ever recalled "
+                            f"({coverage_pct:.0f}%) · median {median_hits} "
+                            f"hits/fragment · {recent_recalled} active in 7d"
+                        ),
+                        state="ok",
+                    )
+
+                    # Inbox drain rate (7d window). Drain rate matters more
+                    # than depth — a fast queue with 200 items is healthier
+                    # than a stalled queue with 20.
+                    drain = st._conn.execute(
+                        """SELECT
+                             SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS appr,
+                             SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rej,
+                             SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pen
+                           FROM extraction_candidates
+                           WHERE created_at >= datetime('now', '-7 days')"""
+                    ).fetchone()
+                    d_appr = int(drain["appr"] or 0)
+                    d_rej = int(drain["rej"] or 0)
+                    d_pen = int(drain["pen"] or 0)
+                    total7 = d_appr + d_rej + d_pen
+                    if total7 == 0:
+                        ui.step(
+                            "Inbox drain (7d)",
+                            detail="no captures in window (idle queue)",
+                            state="ok",
+                        )
+                    else:
+                        drained_pct = 100.0 * (d_appr + d_rej) / total7
+                        ui.step(
+                            "Inbox drain (7d)",
+                            detail=(
+                                f"{d_appr} approved · {d_rej} rejected · "
+                                f"{d_pen} still pending of {total7} captured "
+                                f"({drained_pct:.0f}% drained)"
+                            ),
+                            state="ok" if drained_pct >= 70 else "warn",
+                        )
+
+                    # Iter 35: recall→write rate. Of the recalls in the last
+                    # 24h, how many led to a fragment back-linked via
+                    # from_recall? Idle daemons read 0/0 = "no signal yet."
+                    linked, total24 = st.recall_write_stats(hours=24)
+                    if total24 == 0:
+                        ui.step(
+                            "Recall→write (24h)",
+                            detail="no recalls in window (idle daemon)",
+                            state="ok",
+                        )
+                    else:
+                        pct = 100.0 * linked / total24
+                        ui.step(
+                            "Recall→write (24h)",
+                            detail=(
+                                f"{linked}/{total24} recalls produced a "
+                                f"linked write ({pct:.0f}%)"
+                            ),
+                            state="ok",
+                        )
+                except Exception:
+                    # Read-only diagnostics — never wedge doctor.
+                    pass
             finally:
                 st.close()
         except Exception:
@@ -2857,6 +2677,16 @@ def doctor(show_perf: bool, do_clean: bool, do_reingest: bool) -> None:
         console.print(f"  [red]{issues} issue{plural} found.[/red]")
     else:
         console.print("  [green]All checks passed.[/green]")
+
+    try:
+        from .version_check import update_banner
+        banner = update_banner()
+        if banner:
+            ui.blank()
+            console.print(f"  {banner}")
+    except Exception:
+        pass
+
     ui.blank()
 
 
@@ -2864,161 +2694,8 @@ def doctor(show_perf: bool, do_clean: bool, do_reingest: bool) -> None:
 # scope (sub-group)
 # ---------------------------------------------------------------------------
 
-@main.group(hidden=True)
-def scope() -> None:
-    """Manage scopes (create, list, show lineage)."""
 
 
-@scope.command("create")
-@click.argument("handle")
-@click.option("--name", default=None, help="Human name. Defaults to handle.")
-@click.option("--type", "scope_type", default="project",
-              type=click.Choice(["public", "org", "team", "project", "personal"]),
-              show_default=True)
-@click.option("--parent", default=None, help="Parent scope handle.")
-@click.option("--json", "output_json", is_flag=True, default=False)
-def scope_create(
-    handle: str,
-    name: Optional[str],
-    scope_type: str,
-    parent: Optional[str],
-    output_json: bool,
-) -> None:
-    """Create a new scope.
-
-    \b
-    Example:
-        skein scope create project:myapp --name "My App"
-    """
-    payload: dict = {
-        "handle": handle,
-        "type": scope_type,
-        "name": name or handle,
-        "owner_id": "",  # server fills from auth
-    }
-    if parent:
-        payload["parent_scope_id"] = parent
-
-    with _client() as client:
-        _require_running(client)
-        resp = client.post("/v1/scopes", json=payload)
-
-    if resp.status_code == 201:
-        data = resp.json()
-        if output_json:
-            print(json.dumps(data, indent=2))
-        else:
-            console.print(f"[green]✓[/green] Scope created: [cyan]{data['handle']}[/cyan]  [dim]{data['id'][:8]}…[/dim]")
-    elif resp.status_code == 409:
-        console.print(f"[yellow]Scope '{handle}' already exists.[/yellow]")
-    else:
-        err_console.print(f"[red]✗[/red] Error {resp.status_code}: {resp.text}")
-        sys.exit(1)
-
-
-@scope.command("list")
-@click.option("--json", "output_json", is_flag=True, default=False)
-def scope_list(output_json: bool) -> None:
-    """List all scopes."""
-    with _client() as client:
-        _require_running(client)
-        resp = client.get("/v1/scopes")
-
-    data = resp.json()
-    if output_json:
-        print(json.dumps(data, indent=2))
-        return
-
-    if not data:
-        console.print("[dim]No scopes.[/dim]")
-        return
-
-    from rich.table import Table
-    table = Table(title="Scopes")
-    table.add_column("Handle", style="cyan")
-    table.add_column("Type")
-    table.add_column("Name")
-    table.add_column("ID", style="dim")
-    for s in data:
-        table.add_row(s["handle"], s["type"], s["name"], s["id"][:8] + "…")
-    console.print(table)
-
-
-# ---------------------------------------------------------------------------
-# hook (singular) — handlers invoked by Claude Code etc.
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# docs — passive markdown documentation scanner (iter 19)
-# ---------------------------------------------------------------------------
-
-
-@main.group(hidden=True)
-def docs() -> None:
-    """Index the project's markdown documentation into Skein."""
-
-
-@docs.command("sync")
-@click.option("--repo", default=None, type=click.Path(file_okay=False),
-              help="Project root to scan (default: cwd).")
-@click.option("--scope", default=None, help="Scope handle (default: from .skein/scope or config).")
-def docs_sync(repo: Optional[str], scope: Optional[str]) -> None:
-    """Re-scan README/CHANGELOG/docs/** and promote fragments now.
-
-    Useful after editing the project's docs without re-running ``skein up``.
-    Uses the same supersede pipeline so updated content replaces the prior
-    fragment in place rather than stacking copies.
-    """
-    from . import ui
-    from .auth import token_prefix as _tp
-    from .config import get_config
-    from .docs_watcher import scan_docs
-    from .embeddings import get_provider as _get_emb
-    from .models import IdentityCreate
-    from .passive import promote_scanned_facts
-    from .storage import Storage
-
-    repo_path = Path(repo).resolve() if repo else Path.cwd().resolve()
-    if not repo_path.is_dir():
-        err_console.print(f"[red]✗[/red] Repo path not found: {repo_path}")
-        sys.exit(1)
-
-    scope_handle = scope or _resolve_scope(None)
-    cfg = get_config()
-    st = Storage(cfg.db_path)
-    try:
-        scope_obj = st.get_scope(scope_handle)
-        if scope_obj is None:
-            err_console.print(f"[red]✗[/red] Scope '{scope_handle}' not found.")
-            sys.exit(1)
-
-        facts = scan_docs(repo_path)
-        if not facts:
-            ui.step("No documentation found to scan", state="ok")
-            return
-
-        identity = st.get_or_create_identity(IdentityCreate(
-            handle=f"user:{_tp(cfg.bearer_token)}",
-            type="user", name="local-user",
-        ))
-        provider = _get_emb(cfg.embedding_provider)
-        res = promote_scanned_facts(
-            facts, storage=st, provider=provider,
-            scope_id=scope_obj.id, owner_id=identity.id,
-            source_tool="docs-scanner",
-        )
-        ui.step(
-            f"Scanned {len(facts)} doc fragment(s)",
-            detail=(
-                f"{res.auto_promoted} new · "
-                f"{res.superseded} updated · "
-                f"{res.duplicate} unchanged · "
-                f"{res.queued} queued"
-            ),
-            state="ok",
-        )
-    finally:
-        st.close()
 
 
 @main.group(hidden=True)
@@ -3064,666 +2741,11 @@ def hook_post_tool_use() -> None:
 # hooks (plural) — install/uninstall/list autonomous wiring
 # ---------------------------------------------------------------------------
 
-@main.group(hidden=True)
-def hooks() -> None:
-    """Install, list, or remove autonomous hooks in a project."""
 
 
-@hooks.command("install")
-@click.option("--scope", default=None, help="Scope to pin for this project (default from config).")
-@click.option("--repo", default=None, type=click.Path(file_okay=False),
-              help="Project root (default: cwd).")
-@click.option("--global", "user_global", is_flag=True, default=False,
-              help="Also install hooks at ~/.claude/settings.json (applies to all projects).")
-@click.option("--skein-bin", default="skein", show_default=True,
-              help="Path to skein binary used in the hook commands.")
-def hooks_install(
-    scope: Optional[str],
-    repo: Optional[str],
-    user_global: bool,
-    skein_bin: str,
-) -> None:
-    """Install autonomous Skein hooks for Claude Code, Cursor, and friends.
 
-    \b
-    Drops:
-      .skein/scope                  — pins the project scope for hooks
-      .claude/settings.json         — registers SessionStart/Stop/PostToolUse hooks
-      .cursor/rules/skein.mdc       — auto-applied Cursor rule
-      ~/.claude/settings.json       — (with --global) user-wide hooks
 
-    \b
-    After this, opening Claude Code in this directory will:
-      • Auto-inject project context at session start
-      • Auto-recall on every user prompt
-      • Auto-remember decisions when Claude finishes a turn
-      • Auto-record file edits as observations
-    """
-    from .hooks_install import install_hooks
 
-    cfg = _get_config()
-    repo_path = Path(repo) if repo else Path.cwd()
-    scope_handle = _resolve_scope(scope)
-
-    report = install_hooks(
-        repo_path=repo_path,
-        scope_handle=scope_handle,
-        skein_bin=skein_bin,
-        user_global=user_global,
-    )
-
-    if report.written:
-        console.print("[bold green]✓ Hooks installed:[/bold green]")
-        for item in report.written:
-            console.print(f"  {item}")
-    if report.skipped:
-        console.print("[bold yellow]⊘ Skipped:[/bold yellow]")
-        for item in report.skipped:
-            console.print(f"  {item}")
-    if report.errors:
-        console.print("[bold red]✗ Errors:[/bold red]")
-        for item in report.errors:
-            console.print(f"  {item}")
-        sys.exit(1)
-
-    console.print(
-        f"\n[bold]Scope pinned:[/bold] [cyan]{scope_handle}[/cyan]\n"
-        f"[dim]Open Claude Code here — it will auto-recall and auto-remember.[/dim]"
-    )
-
-
-@hooks.command("uninstall")
-@click.option("--repo", default=None, type=click.Path(file_okay=False))
-def hooks_uninstall(repo: Optional[str]) -> None:
-    """Remove Skein-managed hooks (preserves user-added entries)."""
-    from .hooks_install import uninstall_hooks
-
-    repo_path = Path(repo) if repo else Path.cwd()
-    report = uninstall_hooks(repo_path)
-
-    if report.written:
-        console.print("[bold green]✓ Removed:[/bold green]")
-        for item in report.written:
-            console.print(f"  {item}")
-    if report.skipped:
-        for item in report.skipped:
-            console.print(f"  [dim]⊘ {item}[/dim]")
-
-
-@hooks.command("list")
-@click.option("--repo", default=None, type=click.Path(file_okay=False))
-def hooks_list(repo: Optional[str]) -> None:
-    """Show what Skein hooks are installed in this project / globally."""
-    repo_path = Path(repo) if repo else Path.cwd()
-
-    from rich.table import Table
-    table = Table(title="Skein hooks")
-    table.add_column("Location", style="cyan")
-    table.add_column("File")
-    table.add_column("Status")
-
-    targets = [
-        ("Project scope pin", repo_path / ".skein" / "scope"),
-        ("Project Claude Code", repo_path / ".claude" / "settings.json"),
-        ("Project Cursor rule", repo_path / ".cursor" / "rules" / "skein.mdc"),
-        ("User-global Claude Code", Path.home() / ".claude" / "settings.json"),
-    ]
-    for label, path in targets:
-        if path.exists():
-            # For Claude settings, check if Skein entries are present
-            if path.name == "settings.json":
-                try:
-                    data = json.loads(path.read_text())
-                    has_skein = any(
-                        any(b.get("__skein_managed") for b in blocks if isinstance(b, dict))
-                        for blocks in data.get("hooks", {}).values()
-                        if isinstance(blocks, list)
-                    )
-                    status_text = "[green]installed[/green]" if has_skein else "[dim]no skein entry[/dim]"
-                except Exception:
-                    status_text = "[red]unreadable[/red]"
-            else:
-                status_text = "[green]present[/green]"
-            table.add_row(label, str(path), status_text)
-        else:
-            table.add_row(label, str(path), "[dim]missing[/dim]")
-    console.print(table)
-
-
-# ---------------------------------------------------------------------------
-# ingest — codebase / document RAG
-# ---------------------------------------------------------------------------
-
-@main.command(hidden=True)
-@click.argument("path", type=click.Path(exists=True, file_okay=False, dir_okay=True))
-@click.option("--scope", default=None, help="Target scope (default from config).")
-@click.option("--root", "source_root", default=None,
-              help="Stable label for the ingest base. Defaults to PATH's basename.")
-@click.option("--chunk-lines", default=80, show_default=True, type=int,
-              help="Lines per chunk window.")
-@click.option("--overlap-lines", default=10, show_default=True, type=int,
-              help="Line overlap between adjacent windows.")
-@click.option("--include", "include_exts", default=None,
-              help="Comma-separated extensions to include (e.g. .py,.ts,.md).")
-@click.option("--exclude", "extra_excludes", multiple=True,
-              help="Glob patterns / dir names to skip (repeatable).")
-@click.option("--max-bytes", default=None, type=int,
-              help="Max bytes per file. Files larger are skipped.")
-@click.option("--prune", is_flag=True, default=False,
-              help="Delete chunks whose source file no longer exists.")
-@click.option("--reset", is_flag=True, default=False,
-              help="Delete all chunks under this root before re-ingesting.")
-@click.option("--dry-run", is_flag=True, default=False,
-              help="Walk and chunk but do not write anything.")
-@click.option("--quiet", "-q", is_flag=True, default=False,
-              help="Suppress per-file progress.")
-def ingest(
-    path: str,
-    scope: Optional[str],
-    source_root: Optional[str],
-    chunk_lines: int,
-    overlap_lines: int,
-    include_exts: Optional[str],
-    extra_excludes: tuple,
-    max_bytes: Optional[int],
-    prune: bool,
-    reset: bool,
-    dry_run: bool,
-    quiet: bool,
-) -> None:
-    """Ingest a directory of code/docs into the chunks index for RAG.
-
-    \b
-    Examples:
-        skein ingest ~/Documents/myapp
-        skein ingest ./src --include .py,.md --scope project:myapp
-        skein ingest . --reset --prune        # full re-index
-        skein ingest . --dry-run              # see what would be done
-
-    \b
-    The chunks index is searched by:
-        skein search "query"
-        and the MCP `search_code` tool (called by Claude Code, Cursor, etc.).
-    """
-    from .config import get_config
-    from .embeddings import get_provider as _get_emb
-    from .ingest import (
-        MAX_FILE_BYTES,
-        ingest_directory,
-    )
-    from .models import IdentityCreate, ScopeCreate
-    from .storage import Storage
-
-    cfg = get_config()
-    scope_handle = _resolve_scope(scope)
-    repo_path = Path(path).resolve()
-    root_label = source_root or repo_path.name
-
-    storage = Storage(cfg.db_path)
-    try:
-        # Auto-create scope if missing (CLI runs without daemon)
-        scope_obj = storage.get_scope(scope_handle)
-        if not scope_obj:
-            owner = storage.get_or_create_identity(IdentityCreate(
-                handle=f"user:{cfg.bearer_token[:8] if cfg.bearer_token else 'cli'}",
-                type="user", name="local-user",
-            ))
-            scope_type = scope_handle.split(":", 1)[0] if ":" in scope_handle else "project"
-            if scope_type not in {"public", "org", "team", "project", "personal"}:
-                scope_type = "project"
-            scope_obj = storage.create_scope(ScopeCreate(
-                handle=scope_handle, type=scope_type,
-                name=scope_handle.split(":", 1)[-1], owner_id=owner.id,
-            ))
-            console.print(f"[dim]Auto-created scope {scope_handle}[/dim]")
-
-        if reset and not dry_run:
-            n = storage.delete_chunks_by_root(scope_obj.id, root_label)
-            if n:
-                console.print(f"[dim]Reset: deleted {n} existing chunks under '{root_label}'[/dim]")
-
-        # Embedding provider (best-effort; ingest still works without)
-        try:
-            provider = _get_emb(cfg.embedding_provider)
-        except Exception as e:
-            console.print(f"[yellow]⚠ Embedding provider unavailable ({e}); ingesting keyword-only.[/yellow]")
-            provider = None
-
-        # Parse include extensions
-        include_set = None
-        if include_exts:
-            include_set = {
-                ext if ext.startswith(".") else f".{ext}"
-                for ext in include_exts.split(",")
-            }
-
-        max_b = max_bytes if max_bytes is not None else MAX_FILE_BYTES
-
-        progress_cb = None
-        if not quiet:
-            def progress_cb(rel_path: str, stats):
-                console.print(
-                    f"  [dim]{stats.files_ingested:>4}[/dim] {rel_path}",
-                    highlight=False,
-                )
-
-        console.print(
-            f"[bold]Ingesting[/bold] {repo_path}\n"
-            f"  scope:  [cyan]{scope_handle}[/cyan]\n"
-            f"  root:   [cyan]{root_label}[/cyan]\n"
-            f"  embed:  {cfg.embedding_provider}{' (skipped — no provider)' if provider is None else ''}\n"
-            f"  chunks: {chunk_lines} lines / {overlap_lines} overlap\n"
-        )
-
-        stats = ingest_directory(
-            repo_path,
-            storage,
-            provider,
-            scope_id=scope_obj.id,
-            source_root=root_label,
-            chunk_lines=chunk_lines,
-            overlap_lines=overlap_lines,
-            include_exts=include_set,
-            extra_excludes=tuple(extra_excludes),
-            max_file_bytes=max_b,
-            prune_missing=prune,
-            dry_run=dry_run,
-            progress_cb=progress_cb,
-        )
-
-        # Summary
-        kb = stats.bytes_processed / 1024
-        body = (
-            f"  Files seen:       [bold]{stats.files_seen}[/bold]\n"
-            f"  Files ingested:   [bold]{stats.files_ingested}[/bold]\n"
-            f"  Files skipped:    {stats.files_skipped}\n"
-            f"  Chunks inserted:  [bold green]{stats.chunks_inserted}[/bold green]\n"
-            f"  Chunks updated:   [yellow]{stats.chunks_updated}[/yellow]\n"
-            f"  Chunks unchanged: {stats.chunks_unchanged}\n"
-            f"  Chunks pruned:    {stats.chunks_pruned}\n"
-            f"  Bytes processed:  {kb:.1f} KB"
-        )
-        if stats.errors:
-            body += f"\n\n[red]Errors ({len(stats.errors)}):[/red]"
-            for err in stats.errors[:10]:
-                body += f"\n  • {err}"
-            if len(stats.errors) > 10:
-                body += f"\n  … and {len(stats.errors) - 10} more"
-        from rich.panel import Panel
-        console.print(Panel(body, title="Ingest summary", expand=False))
-
-        if stats.skipped_paths and not quiet:
-            console.print(
-                f"[dim]Skipped {len(stats.skipped_paths)} paths "
-                f"(too large / non-utf8). First 5:[/dim]"
-            )
-            for s in stats.skipped_paths[:5]:
-                console.print(f"  [dim]• {s}[/dim]")
-    finally:
-        storage.close()
-
-
-# ---------------------------------------------------------------------------
-# search — codebase semantic search
-# ---------------------------------------------------------------------------
-
-@main.command(hidden=True)
-@click.argument("query")
-@click.option("--scope", default=None)
-@click.option("--language", "-l", multiple=True,
-              help="Filter by language (repeatable). E.g. -l python -l typescript")
-@click.option("--root", "source_root", default=None,
-              help="Restrict to a specific ingest root.")
-@click.option("--limit", "-n", default=10, show_default=True, type=int)
-@click.option("--show-content/--no-show-content", default=True,
-              help="Print the matched chunk content.")
-@click.option("--max-content-lines", default=20, show_default=True, type=int,
-              help="Truncate displayed chunk content to this many lines.")
-@click.option("--json", "output_json", is_flag=True, default=False)
-def search(
-    query: str,
-    scope: Optional[str],
-    language: tuple,
-    source_root: Optional[str],
-    limit: int,
-    show_content: bool,
-    max_content_lines: int,
-    output_json: bool,
-) -> None:
-    """Hybrid BM25 + vector search over the indexed codebase.
-
-    \b
-    Examples:
-        skein search "how does authentication work"
-        skein search "rate limiting" --language python --limit 5
-        skein search "store fragment with embedding" --root skein
-    """
-    from .config import get_config
-    from .embeddings import get_provider as _get_emb
-    from .models import ChunkSearchRequest
-    from .retrieval import search_chunks
-    from .storage import Storage
-
-    cfg = get_config()
-    scope_handle = _resolve_scope(scope)
-
-    storage = Storage(cfg.db_path)
-    try:
-        try:
-            provider = _get_emb(cfg.embedding_provider)
-        except Exception as e:
-            err_console.print(f"[yellow]⚠ Embedding provider unavailable ({e}); keyword-only.[/yellow]")
-            from .embeddings import HashEmbeddingProvider
-            provider = HashEmbeddingProvider()  # so the request still has a dim
-
-        req = ChunkSearchRequest(
-            query=query,
-            scope=scope_handle,
-            languages=list(language) if language else None,
-            source_root=source_root,
-            limit=limit,
-        )
-        response = search_chunks(req, storage, provider)
-    finally:
-        storage.close()
-
-    if output_json:
-        print(json.dumps(response.model_dump(), indent=2))
-        return
-
-    from . import ui
-
-    if not response.results:
-        ui.section(f"Search: {query!r}")
-        ui.blank()
-        ui.bullet(f"No code chunks matched in [cyan]{scope_handle}[/cyan].")
-        ui.hint("Has the codebase been ingested? Run [bold]skein ingest <path>[/bold] first.")
-        return
-
-    ui.section(f"Search: {query!r}")
-    ui.blank()
-    for r in response.results:
-        c = r.chunk
-        meta = [f"[bold]{c.source_path}[/bold][dim]:{c.line_start}-{c.line_end}[/dim]"]
-        if c.language:
-            meta.append(f"[dim]{c.language}[/dim]")
-        if c.symbol_name:
-            meta.append(f"[yellow]{c.symbol_name}[/yellow]")
-        if r.cosine is not None:
-            meta.append(f"[dim]{r.quality} (cos {r.cosine:.2f})[/dim]")
-        else:
-            meta.append(f"[dim]{r.quality}[/dim]")
-        console.print(
-            f"  [bold cyan]{r.rank:>2}[/bold cyan]  " + "  ".join(meta)
-        )
-        if show_content:
-            lines = c.content.splitlines()
-            total = len(lines)
-            if total > max_content_lines:
-                lines = lines[:max_content_lines]
-                lines.append(f"… ({total - max_content_lines} more lines)")
-            for line in lines:
-                console.print(f"      [dim]│[/dim] {line}", highlight=False)
-        ui.blank()
-    console.print(
-        f"  [dim]{response.total} chunk{'s' if response.total != 1 else ''} "
-        f"in [cyan]{scope_handle}[/cyan][/dim]"
-    )
-    ui.blank()
-
-
-# ---------------------------------------------------------------------------
-# chunks (sub-group)
-# ---------------------------------------------------------------------------
-
-@main.group(hidden=True)
-def chunks() -> None:
-    """Manage the codebase RAG index (list, stats, delete-root)."""
-
-
-@chunks.command("stats")
-@click.option("--scope", default=None)
-@click.option("--json", "output_json", is_flag=True, default=False)
-def chunks_stats(scope: Optional[str], output_json: bool) -> None:
-    """Show how much code is indexed for a scope."""
-    from .config import get_config
-    from .storage import Storage
-
-    cfg = get_config()
-    scope_handle = _resolve_scope(scope)
-    storage = Storage(cfg.db_path)
-    try:
-        scope_obj = storage.get_scope(scope_handle)
-        if not scope_obj:
-            err_console.print(f"[red]✗[/red] Scope '{scope_handle}' not found.")
-            sys.exit(1)
-        s = storage.chunk_stats(scope_id=scope_obj.id)
-    finally:
-        storage.close()
-
-    if output_json:
-        print(json.dumps(s, indent=2))
-        return
-
-    from rich.panel import Panel
-    console.print(Panel.fit(
-        f"Total chunks: [bold]{s['total_chunks']}[/bold]\n"
-        f"Total files:  [bold]{s['total_files']}[/bold]\n\n"
-        f"By language:\n  " + (
-            "\n  ".join(f"{lang}: {n}" for lang, n in sorted(
-                s['by_language'].items(), key=lambda x: -x[1],
-            )) or "(none)"
-        )
-        + "\n\nBy root:\n  " + (
-            "\n  ".join(f"{root}: {n}" for root, n in sorted(
-                s['by_root'].items(), key=lambda x: -x[1],
-            )) or "(none)"
-        ),
-        title=f"Chunks: {scope_handle}",
-    ))
-
-
-@chunks.command("list")
-@click.option("--scope", default=None)
-@click.option("--root", "source_root", default=None)
-@click.option("--language", "-l", default=None)
-@click.option("--limit", "-n", default=20, type=int, show_default=True)
-def chunks_list(
-    scope: Optional[str],
-    source_root: Optional[str],
-    language: Optional[str],
-    limit: int,
-) -> None:
-    """List indexed chunks (for inspection)."""
-    from .config import get_config
-    from .storage import Storage
-
-    cfg = get_config()
-    scope_handle = _resolve_scope(scope)
-    storage = Storage(cfg.db_path)
-    try:
-        scope_obj = storage.get_scope(scope_handle)
-        if not scope_obj:
-            err_console.print(f"[red]✗[/red] Scope '{scope_handle}' not found.")
-            sys.exit(1)
-        items = storage.list_chunks(
-            scope_id=scope_obj.id, source_root=source_root,
-            language=language, limit=limit,
-        )
-    finally:
-        storage.close()
-
-    if not items:
-        console.print("[dim]No chunks.[/dim]")
-        return
-
-    from rich.table import Table
-    table = Table(title=f"Chunks ({len(items)})")
-    table.add_column("Path", style="cyan", overflow="fold")
-    table.add_column("Lines")
-    table.add_column("Lang")
-    table.add_column("Hash", style="dim")
-    for c in items:
-        table.add_row(
-            c.source_path,
-            f"{c.line_start}-{c.line_end}",
-            c.language or "—",
-            c.content_hash[:8],
-        )
-    console.print(table)
-
-
-@chunks.command("delete-root")
-@click.argument("source_root")
-@click.option("--scope", default=None)
-@click.option("--yes", is_flag=True, default=False, help="Skip confirmation.")
-def chunks_delete_root(source_root: str, scope: Optional[str], yes: bool) -> None:
-    """Delete every chunk under a given source_root."""
-    from . import ui
-    from .config import get_config
-    from .storage import Storage
-
-    cfg = get_config()
-    scope_handle = _resolve_scope(scope)
-
-    if not yes:
-        click.confirm(
-            f"Really delete ALL chunks under root '{source_root}' in {scope_handle}?",
-            abort=True,
-        )
-
-    storage = Storage(cfg.db_path)
-    try:
-        scope_obj = storage.get_scope(scope_handle)
-        if not scope_obj:
-            err_console.print(f"  {ui.mark('err')} Scope '{scope_handle}' not found.")
-            sys.exit(1)
-        n = storage.delete_chunks_by_root(scope_obj.id, source_root)
-    finally:
-        storage.close()
-    ui.blank()
-    ui.step(f"Deleted {n} chunks", detail=f"under '{source_root}'", state="ok")
-    ui.blank()
-
-
-@chunks.command("delete-scope")
-@click.argument("scope_handle")
-@click.option("--yes", is_flag=True, default=False, help="Skip confirmation.")
-@click.option("--vacuum/--no-vacuum", default=True,
-              help="Run VACUUM after deletion to reclaim disk space.")
-def chunks_delete_scope(scope_handle: str, yes: bool, vacuum: bool) -> None:
-    """Wipe every chunk for a scope. Useful after an accidental over-ingest.
-
-    \b
-    Example:
-        skein chunks delete-scope project:ameliomar     # accidental $HOME ingest
-        skein scope create project:ameliomar            # gone afterwards
-    """
-    from . import ui
-    from .config import get_config
-    from .storage import Storage
-
-    cfg = get_config()
-    storage = Storage(cfg.db_path)
-    try:
-        scope_obj = storage.get_scope(scope_handle)
-        if not scope_obj:
-            err_console.print(f"  {ui.mark('err')} Scope '{scope_handle}' not found.")
-            sys.exit(1)
-        n = storage._conn.execute(
-            "SELECT COUNT(*) FROM chunks WHERE scope_id = ?", (scope_obj.id,)
-        ).fetchone()[0]
-        if n == 0:
-            ui.hint(f"No chunks under [cyan]{scope_handle}[/cyan].")
-            return
-        if not yes:
-            click.confirm(
-                f"  Delete all {n:,} chunks under {scope_handle}?",
-                abort=True,
-            )
-        # Bulk-delete fast path: the chunks_fts AFTER DELETE trigger does an
-        # unindexed scan of the FTS5 virtual table per row — O(N²) on large
-        # wipes (44k rows ≈ 10+ minutes). Instead we delete from chunks_fts
-        # *first* using a single set-based query, then drop the rows from
-        # chunks with the trigger temporarily dropped (so we don't pay the
-        # per-row scan cost twice). chunks_fts is a standalone FTS5 virtual
-        # table (no ``content=`` link) so the magic ``'rebuild'`` command
-        # doesn't apply here.
-        with console.status(
-            f"[dim]Deleting {n:,} rows…[/dim]", spinner="dots",
-        ):
-            conn = storage._conn
-            try:
-                conn.execute("DROP TRIGGER IF EXISTS chunks_fts_delete")
-                conn.execute("DROP TRIGGER IF EXISTS chunks_fts_update")
-                # 1. Wipe the FTS rows for this scope in one set-based stmt.
-                conn.execute("""
-                    DELETE FROM chunks_fts
-                    WHERE chunk_id IN (SELECT id FROM chunks WHERE scope_id = ?)
-                """, (scope_obj.id,))
-                # 2. Wipe the chunks themselves.
-                cur = conn.execute(
-                    "DELETE FROM chunks WHERE scope_id = ?", (scope_obj.id,)
-                )
-                deleted = cur.rowcount
-                conn.commit()
-            finally:
-                # Recreate the triggers exactly as schema.sql defines them.
-                conn.execute("""
-                    CREATE TRIGGER IF NOT EXISTS chunks_fts_delete
-                    AFTER DELETE ON chunks BEGIN
-                        DELETE FROM chunks_fts WHERE chunk_id = old.id;
-                    END;
-                """)
-                conn.execute("""
-                    CREATE TRIGGER IF NOT EXISTS chunks_fts_update
-                    AFTER UPDATE OF content ON chunks BEGIN
-                        DELETE FROM chunks_fts WHERE chunk_id = old.id;
-                        INSERT INTO chunks_fts(content, chunk_id) VALUES (new.content, new.id);
-                    END;
-                """)
-                conn.commit()
-        ui.blank()
-        ui.step(
-            f"Deleted [bold]{deleted:,}[/bold] chunks",
-            detail=f"under [cyan]{scope_handle}[/cyan]",
-            state="ok",
-        )
-        if vacuum:
-            with console.status(
-                "[dim]Vacuuming database to reclaim disk space…[/dim]",
-                spinner="dots",
-            ):
-                # VACUUM cannot run inside a transaction. Force a checkpoint
-                # first so any pending WAL frames flush, then VACUUM.
-                conn = storage._conn
-                try:
-                    conn.commit()  # close any implicit txn
-                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                    conn.isolation_level = None
-                    conn.execute("VACUUM")
-                except Exception as e:
-                    err_console.print(
-                        f"  {ui.mark('warn')} VACUUM failed: {e}"
-                    )
-                    ui.hint(
-                        "Other readers (daemon, watcher) may be holding the "
-                        "DB open. Run [bold]skein down[/bold] first, then "
-                        "[bold]skein chunks delete-scope[/bold] again, then "
-                        "[bold]skein up[/bold]."
-                    )
-                else:
-                    ui.step("Vacuumed database", state="ok")
-                finally:
-                    conn.isolation_level = ""
-        ui.blank()
-    finally:
-        storage.close()
-
-
-# ---------------------------------------------------------------------------
-# config — view / set runtime config
-# ---------------------------------------------------------------------------
 
 @main.group("config")
 def config_cmd() -> None:
@@ -3772,427 +2794,7 @@ def config_set(key: str, value: str) -> None:
 # archaeology — provenance-aware "where did this decision come from?"
 # ---------------------------------------------------------------------------
 
-@main.command(hidden=True)
-@click.argument("query")
-@click.option("--scope", default=None, help="Restrict to a scope handle. Defaults to auto-resolve.")
-@click.option("--limit", "-n", default=5, show_default=True, type=int,
-              help="How many top matches to expand.")
-def archaeology(query: str, scope: Optional[str], limit: int) -> None:
-    """Trace the history of a decision: matching fragment → provenance → supersede chain.
 
-    Pass a free-text query (e.g. ``skein archaeology "session store"``) or a
-    fragment ID prefix. For each match we print the originating tool, commit
-    hash, files open at decision time, and the full supersede chain in both
-    directions.
-    """
-    from .config import get_config
-    from .models import RecallRequest
-    from .retrieval import recall as do_recall
-    from .scope_resolver import resolve_scope
-    from .storage import Storage
-    from .embeddings import get_provider as _get_provider
-
-    cfg = get_config()
-    if scope is None:
-        handle, _ = resolve_scope(None, config_default=cfg.default_scope)
-    else:
-        handle = scope
-
-    storage = Storage(cfg.db_path)
-    try:
-        scope_obj = storage.get_scope(handle)
-        if not scope_obj:
-            err_console.print(f"[red]✗[/red] Scope '{handle}' not found.")
-            sys.exit(1)
-
-        # Allow fragment-ID lookup as a shortcut: if `query` is a hex prefix
-        # that matches a single fragment ID, jump straight to it.
-        starting: List = []
-        direct = storage._conn.execute(
-            "SELECT id FROM fragments WHERE id LIKE ? AND scope_id = ? LIMIT 2",
-            (query + "%", scope_obj.id),
-        ).fetchall()
-        if len(direct) == 1:
-            frag = storage.get_fragment(direct[0]["id"])
-            if frag:
-                starting = [(frag, 1.0)]
-
-        if not starting:
-            provider = _get_provider(cfg.embedding_provider)
-            response = do_recall(
-                RecallRequest(query=query, scope=handle, limit=limit,
-                              include_stale=True),
-                storage, provider,
-            )
-            starting = [(r.fragment, r.score) for r in response.results]
-
-        if not starting:
-            console.print(f"[yellow]No matches for[/yellow] {query!r}.")
-            return
-
-        for frag, score in starting:
-            _render_archaeology(storage, frag, score)
-            console.print()
-    finally:
-        storage.close()
-
-
-def _render_archaeology(storage, frag, score: float) -> None:
-    """Print one fragment's full provenance + walk supersede chain."""
-    # Walk supersede chain backward (older → newer)
-    chain = [frag]
-    cur = frag
-    while cur.supersedes_fragment_id:
-        prev = storage.get_fragment(cur.supersedes_fragment_id)
-        if not prev or prev.id == cur.id:
-            break
-        chain.insert(0, prev)
-        cur = prev
-    # And forward (newer)
-    cur = frag
-    while cur.superseded_by_fragment_id:
-        nxt = storage.get_fragment(cur.superseded_by_fragment_id)
-        if not nxt or nxt.id == cur.id:
-            break
-        chain.append(nxt)
-        cur = nxt
-
-    head = chain[0]
-    console.print(
-        f"[bold cyan]{head.id[:8]}…[/bold cyan]  "
-        f"[magenta]{head.type}[/magenta]  "
-        f"[dim](score={score:.3f}, scope_id={head.scope_id[:8]}…)[/dim]"
-    )
-
-    for i, f in enumerate(chain):
-        prefix = "  └─" if i > 0 else "   "
-        stale_tag = " [dim](stale)[/dim]" if f.is_stale else ""
-        tool = f.created_by_tool or "(legacy)"
-        method = f.extraction_method or "explicit"
-        conf = f.extraction_confidence if f.extraction_confidence is not None else 1.0
-        console.print(
-            f"{prefix} [yellow]{f.created_at[:19]}[/yellow]  "
-            f"[bold]{f.type}[/bold] via [green]{tool}[/green]  "
-            f"[dim]({method}, conf={conf:.2f})[/dim]{stale_tag}"
-        )
-        console.print(f"      [white]\"{f.content[:280]}\"[/white]")
-        if f.created_against_commit:
-            console.print(
-                f"      [dim]commit:[/dim] {f.created_against_commit[:10]}"
-            )
-        if f.files_open_at_creation:
-            console.print(
-                f"      [dim]files:[/dim]  {', '.join(f.files_open_at_creation[:5])}"
-            )
-        if f.territory:
-            console.print(f"      [dim]territory:[/dim] {f.territory}")
-        if f.tags:
-            console.print(f"      [dim]tags:[/dim]    #" + " #".join(f.tags))
-        if f.stale_reason:
-            console.print(f"      [dim]stale reason:[/dim] {f.stale_reason}")
-
-
-# ---------------------------------------------------------------------------
-# inbox — review queue for passively-extracted candidates
-# ---------------------------------------------------------------------------
-
-@main.group(invoke_without_command=True, hidden=True)
-@click.option("--scope", default=None, help="Filter to a scope. Default: auto-resolve.")
-@click.option("--limit", "-n", default=20, show_default=True, type=int)
-@click.pass_context
-def inbox(ctx: click.Context, scope: Optional[str], limit: int) -> None:
-    """Review medium-confidence fragments extracted by passive watchers.
-
-    Run with no subcommand to list pending items; use
-    ``skein inbox approve <id>`` or ``skein inbox reject <id>`` to act on them.
-    """
-    if ctx.invoked_subcommand is not None:
-        return
-    from .config import get_config
-    from .scope_resolver import resolve_scope
-    from .storage import Storage
-
-    cfg = get_config()
-    handle = scope or resolve_scope(None, config_default=cfg.default_scope)[0]
-    storage = Storage(cfg.db_path)
-    try:
-        scope_obj = storage.get_scope(handle)
-        scope_id = scope_obj.id if scope_obj else None
-        candidates = storage.list_extraction_candidates(scope_id=scope_id, limit=limit)
-        if not candidates:
-            console.print(
-                f"[dim]Inbox empty for scope[/dim] [cyan]{handle}[/cyan]."
-            )
-            return
-        console.print(
-            f"[bold]{len(candidates)}[/bold] pending candidate"
-            f"{'s' if len(candidates) != 1 else ''} "
-            f"in [cyan]{handle}[/cyan]:\n"
-        )
-        for c in candidates:
-            console.print(
-                f"  [yellow]{c['id'][:8]}…[/yellow]  "
-                f"[magenta]{c['type']:11}[/magenta]  "
-                f"[dim]conf={c['confidence']:.2f}  "
-                f"src={c['source_tool']}[/dim]"
-            )
-            console.print(f"    [white]{c['content'][:280]}[/white]")
-            if c.get("source_file"):
-                console.print(f"    [dim]from {c['source_file']}[/dim]")
-            console.print()
-        console.print(
-            "[dim]Run [bold]skein inbox approve <id>[/bold] or "
-            "[bold]skein inbox reject <id>[/bold] to act.[/dim]"
-        )
-    finally:
-        storage.close()
-
-
-def _promote_candidate(
-    cand: dict,
-    *,
-    storage,
-    cfg,
-    commit_message_prefix: str = "inbox-approve",
-):
-    """Shared promote path: candidate dict → fragment + status flip.
-
-    Used by both ``inbox approve`` (single) and ``inbox auto-approve`` (bulk).
-    Returns the created Fragment on success, None if the candidate was already
-    reviewed.
-    """
-    from .models import CommitCreate, FragmentCreate, IdentityCreate
-    from .embeddings import get_provider as _get_provider, vec_to_bytes
-    from .auth import token_prefix as _tp
-
-    if cand["status"] != "pending":
-        return None
-    identity = storage.get_or_create_identity(IdentityCreate(
-        handle=f"user:{_tp(cfg.bearer_token)}", type="user", name="local-user",
-    ))
-    provider = _get_provider(cfg.embedding_provider)
-    embedding_bytes = None
-    try:
-        vec = provider.embed_one(cand["content"])
-        embedding_bytes = vec_to_bytes(vec)
-    except Exception:
-        pass
-    commit = storage.create_commit(CommitCreate(
-        author_id=identity.id, scope_id=cand["scope_id"],
-        message=f"[{commit_message_prefix}] {cand['content'][:60]}",
-    ))
-    frag = storage.create_fragment(
-        FragmentCreate(
-            content=cand["content"], type=cand["type"],
-            scope_id=cand["scope_id"], owner_id=identity.id,
-            territory=cand.get("territory"),
-            tags=json.loads(cand.get("tags") or "[]"),
-            created_by_tool=cand["source_tool"],
-            created_in_session_id=cand.get("source_session_id"),
-            extraction_method=cand["source_tool"],
-            extraction_confidence=cand["confidence"],
-        ),
-        commit_id=commit.id, embedding=embedding_bytes,
-    )
-    storage.mark_candidate_status(cand["id"], "approved",
-                                  promoted_fragment_id=frag.id)
-    return frag
-
-
-@inbox.command("approve")
-@click.argument("candidate_id")
-def inbox_approve(candidate_id: str) -> None:
-    """Promote a pending candidate into a real fragment."""
-    from .config import get_config
-    from .storage import Storage
-    cfg = get_config()
-    storage = Storage(cfg.db_path)
-    try:
-        # Resolve full id from prefix
-        rows = storage._conn.execute(
-            "SELECT id FROM extraction_candidates WHERE id LIKE ? LIMIT 2",
-            (candidate_id + "%",),
-        ).fetchall()
-        if len(rows) == 0:
-            err_console.print(f"[red]✗[/red] No candidate with id starting {candidate_id!r}.")
-            sys.exit(1)
-        if len(rows) > 1:
-            err_console.print(f"[red]✗[/red] Ambiguous prefix; matches {len(rows)} candidates.")
-            sys.exit(1)
-        cand = storage.get_extraction_candidate(rows[0]["id"])
-        frag = _promote_candidate(cand, storage=storage, cfg=cfg)
-        if frag is None:
-            err_console.print(f"[yellow]Already {cand['status']}.[/yellow]")
-            return
-        console.print(
-            f"[green]✓[/green] Approved → fragment {frag.id[:8]}… "
-            f"({frag.type})"
-        )
-    finally:
-        storage.close()
-
-
-@inbox.command("reject")
-@click.argument("candidate_id")
-def inbox_reject(candidate_id: str) -> None:
-    """Mark a candidate as rejected; it won't surface again."""
-    from .config import get_config
-    from .storage import Storage
-    cfg = get_config()
-    storage = Storage(cfg.db_path)
-    try:
-        rows = storage._conn.execute(
-            "SELECT id FROM extraction_candidates WHERE id LIKE ? LIMIT 2",
-            (candidate_id + "%",),
-        ).fetchall()
-        if len(rows) != 1:
-            err_console.print(f"[red]✗[/red] Need a unique candidate id prefix.")
-            sys.exit(1)
-        if storage.mark_candidate_status(rows[0]["id"], "rejected"):
-            console.print(f"[yellow]✗[/yellow] Rejected.")
-        else:
-            console.print("[dim]Already reviewed.[/dim]")
-    finally:
-        storage.close()
-
-
-@inbox.command("auto-approve")
-@click.option("--min-confidence", type=float, default=0.85, show_default=True,
-              help="Only promote candidates with confidence >= this value.")
-@click.option("--min-age-days", type=int, default=0, show_default=True,
-              help="Only promote candidates that have been in the queue for "
-                   "at least this many days. 0 = no age constraint.")
-@click.option("--scope", default=None,
-              help="Filter to a single scope handle. Default: every scope.")
-@click.option("--limit", type=int, default=500, show_default=True,
-              help="Safety cap on how many candidates to promote per run.")
-@click.option("--dry-run", is_flag=True, default=False,
-              help="Show what would be promoted without writing anything.")
-def inbox_auto_approve(
-    min_confidence: float,
-    min_age_days: int,
-    scope: Optional[str],
-    limit: int,
-    dry_run: bool,
-) -> None:
-    """Bulk-promote pending candidates above a confidence threshold.
-
-    Background: passive extractors enqueue medium-confidence findings
-    awaiting human review. In practice the queue tends to grow faster than a
-    user can drain it, and a thick queue starves recall because the high-
-    confidence facts never join the search index. This command bleeds the
-    queue back down by trusting passive extraction's own confidence score.
-
-    Defaults are intentionally conservative — confidence >= 0.85 catches the
-    near-certain auto-extractions that just missed the auto-promote ceiling.
-    Tighten with --min-age-days when you'd rather wait a few days to give
-    yourself a chance to reject obvious garbage first.
-    """
-    from datetime import datetime, timedelta, timezone
-    from .config import get_config
-    from .scope_resolver import resolve_scope
-    from .storage import Storage
-
-    cfg = get_config()
-    storage = Storage(cfg.db_path)
-    try:
-        scope_id: Optional[str] = None
-        if scope:
-            handle = scope
-        else:
-            handle = resolve_scope(None, config_default=cfg.default_scope)[0]
-        scope_obj = storage.get_scope(handle) if scope else None
-        if scope_obj is not None:
-            scope_id = scope_obj.id
-
-        candidates = storage.list_extraction_candidates(
-            scope_id=scope_id, limit=limit,
-        )
-        if min_age_days > 0:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=min_age_days)
-
-            def _too_young(c: dict) -> bool:
-                created = c.get("created_at")
-                if not created:
-                    return False
-                # SQLite's ``datetime('now')`` emits a space-separated string
-                # ("2026-05-17 12:34:56") which ``datetime.fromisoformat``
-                # rejects on Python 3.9/3.10 — pyproject still supports 3.9,
-                # so normalise to the T-separated form before parsing.
-                # Also accept the "...Z" suffix Skein writes from Python-side
-                # iso timestamps.
-                normalised = created.replace(" ", "T", 1).replace("Z", "+00:00")
-                try:
-                    ts = datetime.fromisoformat(normalised)
-                except ValueError:
-                    return False
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                return ts > cutoff
-
-            candidates = [c for c in candidates if not _too_young(c)]
-        eligible = [c for c in candidates if c["confidence"] >= min_confidence]
-
-        if not eligible:
-            console.print(
-                f"[dim]No pending candidates with confidence "
-                f">= {min_confidence:.2f}"
-                + (f" and age >= {min_age_days}d" if min_age_days else "")
-                + ".[/dim]"
-            )
-            return
-
-        console.print(
-            f"[bold]{len(eligible)}[/bold] candidate"
-            f"{'s' if len(eligible) != 1 else ''} eligible "
-            f"(confidence >= {min_confidence:.2f}"
-            + (f", age >= {min_age_days}d" if min_age_days else "")
-            + ")."
-        )
-        if dry_run:
-            for c in eligible[:20]:
-                console.print(
-                    f"  [yellow]{c['id'][:8]}…[/yellow]  "
-                    f"[magenta]{c['type']:11}[/magenta]  "
-                    f"[dim]conf={c['confidence']:.2f}[/dim]  "
-                    f"{c['content'][:120]}"
-                )
-            if len(eligible) > 20:
-                console.print(f"  [dim]…and {len(eligible) - 20} more[/dim]")
-            console.print("[dim]Dry run — nothing written.[/dim]")
-            return
-
-        promoted = 0
-        skipped = 0
-        for c in eligible:
-            try:
-                frag = _promote_candidate(
-                    c, storage=storage, cfg=cfg,
-                    commit_message_prefix="inbox-auto-approve",
-                )
-            except Exception as e:
-                err_console.print(
-                    f"[red]✗[/red] {c['id'][:8]}… failed: {e}"
-                )
-                skipped += 1
-                continue
-            if frag is None:
-                skipped += 1
-            else:
-                promoted += 1
-        console.print(
-            f"[green]✓[/green] Promoted {promoted} fragment"
-            f"{'s' if promoted != 1 else ''}"
-            + (f", skipped {skipped}" if skipped else "")
-            + "."
-        )
-    finally:
-        storage.close()
-
-
-# ---------------------------------------------------------------------------
-# tail — follow the event log
-# ---------------------------------------------------------------------------
 
 @main.command()
 @click.option("-n", "n_lines", default=20, show_default=True, type=int,

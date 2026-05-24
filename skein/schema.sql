@@ -333,3 +333,33 @@ CREATE TABLE IF NOT EXISTS transcript_cursors (
   last_seen_at     TEXT NOT NULL DEFAULT (datetime('now')),
   client_name      TEXT NOT NULL                  -- claude-code, ...
 );
+
+-- ---------------------------------------------------------------------------
+-- Recall outcomes (iter 35)
+-- Capture the "did this recall lead to a write?" signal so the value-decay
+-- loop can later learn from outcomes instead of hit counts alone. Each
+-- recall mints a recall_id; remember()/note() can pass `from_recall` to
+-- link the resulting fragment back explicitly. scope is stored as a handle
+-- string (not FK) so recall on a not-yet-registered scope still records.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS recall_events (
+  recall_id    TEXT PRIMARY KEY,
+  query        TEXT NOT NULL,
+  scope_handle TEXT NOT NULL,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_recall_events_created ON recall_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_recall_events_scope ON recall_events(scope_handle);
+
+CREATE TABLE IF NOT EXISTS recall_links (
+  recall_id   TEXT NOT NULL,
+  fragment_id TEXT NOT NULL,
+  linked_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (recall_id, fragment_id),
+  FOREIGN KEY (recall_id) REFERENCES recall_events(recall_id) ON DELETE CASCADE,
+  FOREIGN KEY (fragment_id) REFERENCES fragments(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_recall_links_recall ON recall_links(recall_id);
+CREATE INDEX IF NOT EXISTS idx_recall_links_fragment ON recall_links(fragment_id);

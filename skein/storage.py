@@ -800,6 +800,51 @@ class Storage:
             list(fragment_ids),
         )
 
+    def record_recall_event(self, recall_id: str, query: str, scope_handle: str) -> None:
+        """Iter 35: capture a recall event for outcome telemetry. INSERT OR
+        IGNORE so daemon retries don't error; recall_id collision is a no-op."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO recall_events (recall_id, query, scope_handle) "
+            "VALUES (?, ?, ?)",
+            (recall_id, query[:500], scope_handle),
+        )
+
+    def link_recall_to_fragment(self, recall_id: str, fragment_id: str) -> bool:
+        """Iter 35: link a recall event to a fragment written as a follow-up.
+        Returns True if the recall_id was found and the link was created (or
+        already existed); False if the recall_id is unknown. A single recall
+        can link to many fragments — the LLM may write multiple notes from
+        one round of recall."""
+        row = self._conn.execute(
+            "SELECT 1 FROM recall_events WHERE recall_id = ?", (recall_id,),
+        ).fetchone()
+        if not row:
+            return False
+        self._conn.execute(
+            "INSERT OR IGNORE INTO recall_links (recall_id, fragment_id) "
+            "VALUES (?, ?)",
+            (recall_id, fragment_id),
+        )
+        return True
+
+    def recall_write_stats(self, hours: int = 24) -> tuple[int, int]:
+        """Iter 35: return ``(linked, total)`` for recall events in the last
+        ``hours``. ``linked`` is the count of recall_ids with at least one
+        fragment back-linked via ``from_recall``. Powers the doctor
+        recall→write rate line."""
+        cutoff = f"-{int(hours)} hours"
+        total = self._conn.execute(
+            "SELECT COUNT(*) FROM recall_events WHERE created_at >= datetime('now', ?)",
+            (cutoff,),
+        ).fetchone()[0]
+        linked = self._conn.execute(
+            "SELECT COUNT(DISTINCT re.recall_id) FROM recall_events re "
+            "JOIN recall_links rl ON rl.recall_id = re.recall_id "
+            "WHERE re.created_at >= datetime('now', ?)",
+            (cutoff,),
+        ).fetchone()[0]
+        return (int(linked), int(total))
+
     def recent_writes_by_tool(self, hours: int = 24) -> dict[str, int]:
         """Iter 29 day-one: return ``{created_by_tool: count}`` for non-stale
         fragments written in the last ``hours``.

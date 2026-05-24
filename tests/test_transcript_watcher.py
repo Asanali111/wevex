@@ -216,6 +216,10 @@ def test_watcher_poll_once_extracts_and_advances_cursor(tmp_path: Path) -> None:
         storage=storage, provider=provider,
         scope_id=scope.id, owner_id=ident.id,
         project_cwd=project, client_root=root,
+        # Iter 32: default flipped to smart-only (≥0.90 conf). The seeded
+        # messages here exercise the looser patterns (≥0.78), so explicitly
+        # disable the filter for this watcher-mechanics test.
+        smart_only=False,
     )
     n = w.poll_once()
     assert n >= 2  # parsed two non-system messages

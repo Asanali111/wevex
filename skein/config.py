@@ -52,6 +52,16 @@ DEFAULTS: dict[str, Any] = {
     "inbox_auto_approve_interval": 300,     # seconds between inbox sweeps
     "inbox_auto_approve_threshold": 0.85,   # confidence floor for auto-promote
     "inbox_auto_reject_days": 14,           # candidates older than this get rejected
+    # Iter 34: value-aware early-reject. Transcript-* tools generate lots of
+    # mid-sentence chat noise that will never clear the 0.85 confidence bar
+    # but sits pending for 14 days under the time-based reject rule. Compute
+    # the same value the scorer would assign at promotion time; anything
+    # below the floor gets rejected on the first sweep, regardless of age.
+    # Only applied to source_tools matching ``inbox_value_floor_tool_prefix``
+    # so structured passive scanners (code-scanner, docs-watcher) are
+    # untouched. Set ``inbox_auto_reject_value_floor`` to 0 to disable.
+    "inbox_auto_reject_value_floor": 0.35,
+    "inbox_value_floor_tool_prefix": "transcript",
     # Iter 28 boot-perf: code + docs scanner moved off the `skein up` hot
     # path into a daemon background sweep so warm boot hits <2 s.
     "passive_scan_interval": 300,           # seconds between scanner+docs sweeps
@@ -99,6 +109,12 @@ class SkeinConfig:
         self.inbox_auto_approve_interval: int = int(merged["inbox_auto_approve_interval"])
         self.inbox_auto_approve_threshold: float = float(merged["inbox_auto_approve_threshold"])
         self.inbox_auto_reject_days: int = int(merged["inbox_auto_reject_days"])
+        self.inbox_auto_reject_value_floor: float = float(
+            merged["inbox_auto_reject_value_floor"]
+        )
+        self.inbox_value_floor_tool_prefix: str = str(
+            merged["inbox_value_floor_tool_prefix"]
+        ).strip().lower()
         self.passive_scan_interval: int = int(merged["passive_scan_interval"])
         self.embedding_idle_check_interval: int = int(merged["embedding_idle_check_interval"])
         self.value_decay_interval: int = int(merged["value_decay_interval"])

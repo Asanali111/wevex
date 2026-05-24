@@ -44,6 +44,20 @@ BUDGETS: Dict[str, Dict[str, Tuple[Op, float]]] = {
         "max_chars_per_result": ("<=", 2000.0),
         "total_chars":          ("<=", 40000.0),
     },
+    # Iter 31 ONNX-idle-unload: after the configured idle window, the
+    # FastembedProvider drops its ONNX runtime. The expected floor is
+    # ~200 MB but a conservative 50 MB catches the case where the unload
+    # silently regresses to a no-op. The post-idle resident ceiling
+    # (350 MB) catches the related regression where the daemon's
+    # baseline RSS balloons (e.g. someone loads embeddings eagerly on
+    # every recall and the cache never drains). Both budgets only fire
+    # when the scenario returned status="pass"; the ephemeral "no
+    # unload hook" path returns status="warn" precisely so it doesn't
+    # trip these floors.
+    "daemon_rss": {
+        "idle_rss_drop_mb": (">=", 50.0),
+        "post_idle_rss_mb": ("<=", 350.0),
+    },
 }
 
 

@@ -4,22 +4,25 @@
 > One daemon, every coding client connected to the same typed context.
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 ---
 
 ## The problem
 
-Every LLM tool ships its own memory silo. Switching tools = starting from zero. Two agents on the same project can't see each other's work. Copy-paste between Claude Code, Cursor, Codex, and Gemini CLI is the actual current solution.
+Every LLM tool ships its own memory silo. Switching tools = starting from zero. Two agents on the same project can't see each other's work. Copy-paste between Claude Code, Cursor, Windsurf, Hermes, and a dozen other tools is the actual current solution.
 
 ## The solution
 
 One local daemon. Every coding client connects via MCP (or AGENTS.md for non-MCP tools). They share typed **fragments** (decisions, state, observations, requirements) per **scope** (project / team / org), coordinate via **advisory leases**, and all get the same rendered **AGENTS.md**.
 
 ```
-  Claude Code  Cursor  Codex  Gemini CLI  VS Code  Copilot  opencode
-       │           │        │       │          │        │        │
-       └──── MCP Streamable HTTP (127.0.0.1:8765/mcp) ─────────┘
+  Claude Code  Cursor  Windsurf  Kiro  Codex  Hermes  Goose  Crush  gptme
+       │           │        │      │      │       │       │      │      │
+       └──────────── MCP Streamable HTTP (127.0.0.1:8765/mcp) ─────────┘
+  Continue.dev  Antigravity  VS Code / Copilot  opencode  (+ more via skein connect)
+       │               │              │              │
+       └───────────────┴──────────────┴──────────────┘
                                     │
                        ┌────────────┴────────────┐
                        │   FastAPI + MCP server  │  one process, one port
@@ -62,7 +65,30 @@ pip3 install skn          # macOS users where `pip` points at Python 2
 py -m pip install skn     # Windows
 ```
 
-After `skein up`, every connected LLM (Claude Code, Cursor, Codex, Gemini CLI, Antigravity, Copilot, VS Code, opencode) automatically has shared context for the project. The daemon runs as a background service that survives terminal close **and reboots** on all three OSes — launchd agent on macOS, systemd-user unit on Linux, Scheduled Task (logon trigger, restart-on-failure) on Windows.
+After `skein up`, every detected client automatically has shared context for the project. The daemon runs as a background service that survives terminal close **and reboots** on all three OSes — launchd agent on macOS, systemd-user unit on Linux, Scheduled Task (logon trigger, restart-on-failure) on Windows.
+
+### Supported clients
+
+`skein connect` auto-detects and wires up any of these:
+
+| Client | MCP config written | Notes |
+|--------|--------------------|-------|
+| Claude Code | `claude mcp add skein` | Via CLI; bearer token in header |
+| Cursor | `.cursor/mcp.json` | |
+| Windsurf | `.windsurf/mcp.json` | Uses `serverUrl` key |
+| Kiro | `.kiro/settings/mcp.json` | AWS spec-first IDE (GA May 2026) |
+| VS Code / Copilot | `.vscode/mcp.json` | One entry covers both |
+| Codex CLI | `.codex/config.toml` | TOML `[[mcpServers]]` block |
+| Antigravity | `~/.gemini/antigravity/mcp_config.json` | Google's Gemini CLI replacement |
+| Hermes | `~/.hermes/config.yaml` + `~/.hermes/.env` | Nous Research; token in env var |
+| Goose | `~/.config/goose/config.yaml` | Block; `streamable_http` transport |
+| Crush | `.crush.json` | Charm; explicit `"type": "http"` |
+| gptme | `~/.config/gptme/config.toml` | TOML `[[mcp.servers]]` block |
+| Continue.dev | `~/.continue/mcpServers/skein.yaml` | Dedicated block file |
+| opencode | `~/.config/opencode/config.json` | |
+| Gemini CLI | `~/.gemini/settings.json` | Sunset June 18 2026; use Antigravity |
+
+**Pi.dev**: no native MCP support (deliberate design choice). A community adapter exists at [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) but is unmaintained. Skein does not auto-detect Pi.
 
 ### Windows notes
 
@@ -92,7 +118,7 @@ again on first login in that case.
 | 2. Daemon | Install + start a background service (auto-relocates the venv to `~/.skein/venv` if needed for macOS TCC) |
 | 3. Scope | Auto-detect from git remote (`git@github.com:user/repo.git` → `project:repo`) or cwd name |
 | 4. Hooks | Drop `.claude/settings.json` + `.cursor/rules/skein.mdc` + `.skein/scope` so every LLM auto-recalls and auto-remembers |
-| 5. Sync | Write MCP configs for every detected client (Cursor, VS Code, Codex, Gemini CLI, Antigravity, opencode, Claude Code) + AGENTS.md + CLAUDE.md |
+| 5. Sync | Write MCP configs for every detected client (Claude Code, Cursor, Windsurf, Kiro, Codex, Hermes, Goose, Crush, gptme, Continue.dev, Antigravity, VS Code / Copilot, opencode) + AGENTS.md + CLAUDE.md |
 | 6. Ingest | Index the codebase for semantic search — incremental, free re-runs |
 | 7. Watcher | Spawn a session-scoped subprocess that re-ingests changed files within ~2 seconds. Survives terminal close; dies on logout (re-spawned by next `skein up`) |
 
@@ -101,8 +127,8 @@ To turn it off:
 ```bash
 skein down       # stop the daemon and remove hooks from this project
 skein restart    # restart the daemon
-skein daemon status   # see what's running
-skein daemon logs     # tail the daemon log
+skein status     # see what's running (daemon + clients + counts)
+skein doctor     # deeper diagnostic (logs, value distribution, inbox depth)
 ```
 
 ### After `skein up` — day-to-day usage
@@ -221,7 +247,7 @@ MCP prompt:
 
 ## Autonomous mode
 
-`skein hooks install` turns Skein from "tools the LLM can call" into "context that flows automatically without anyone asking." It writes a small set of files into the current project:
+`skein up` (which also runs on `skein connect`) turns Skein from "tools the LLM can call" into "context that flows automatically without anyone asking." It writes a small set of files into the current project:
 
 | File | Purpose |
 |---|---|
@@ -248,18 +274,19 @@ The hooks talk to the SQLite DB **directly**, so they:
 **Multi-tool scenario:** Open Claude Code in a hook-installed project and ask it to make a decision. Close it. Open Cursor in the same project — it reads `AGENTS.md` (rendered from the same fragments) and reads its rule file (which tells it to `recall` proactively). Cursor sees the decision Claude just made.
 
 ```bash
-# After init + serve + sync, run once per project:
+# Run once per project — installs hooks for every detected client:
 cd ~/Documents/your-project
-skein hooks install --scope project:your-project
+skein up
 
-# Verify what was installed
-skein hooks list
+# What's wired up?
+skein status
 
-# Remove later (preserves any user-added hook entries):
-skein hooks uninstall
+# Disconnect a client (removes the hooks):
+skein connect cursor --remove
+skein connect --all --remove   # disconnect everything
 ```
 
-`--global` adds the same hooks at `~/.claude/settings.json` so they apply across every project (the per-project `.skein/scope` file pins which scope to use).
+`skein up` writes the hooks into `.claude/settings.json` automatically (the per-project `.skein/scope` file pins which scope to use).
 
 ---
 
@@ -269,21 +296,19 @@ Fragments are great for typed context — decisions, requirements, observations.
 
 ### Ingest a codebase
 
+`skein up` runs the initial ingest and registers a file-watcher that
+keeps the chunk index current automatically. The visible knobs:
+
 ```bash
-# Index every supported file under ./src
-skein ingest ./src --scope project:myapp
+# First-time setup: indexes the cwd and starts the watcher.
+skein up
 
-# Filter by extension
-skein ingest . --include .py,.md --scope project:myapp
+# Force a full re-index (replaces the old `skein ingest .`):
+skein doctor --reingest
 
-# Re-index after changes (skips unchanged chunks via content hash)
-skein ingest . --scope project:myapp
-
-# Re-index and remove chunks for files that no longer exist
-skein ingest . --scope project:myapp --prune
-
-# Wipe and rebuild
-skein ingest . --scope project:myapp --reset
+# Re-embed every fragment under the active embedding provider
+# (e.g. after switching from gemini to fastembed):
+skein doctor --reindex-embeddings
 ```
 
 What gets ingested:
@@ -296,34 +321,27 @@ Each file is split into overlapping line windows (default 80 lines, 10-line over
 
 ### Search the ingested code
 
-```bash
-# CLI
-skein search "how does authentication work"
-skein search "rate limit middleware" --language python --limit 5
-skein search "store fragment with embedding" --root skein
+The agent is the canonical caller — the MCP `search_code` tool is what
+Claude Code, Cursor, Codex, etc. invoke directly. Humans see the same
+ranking through the REST endpoint:
 
-# REST
+```bash
+# MCP — Claude Code, Cursor, etc. call this directly
+search_code(query="how does auth work", scope="project:myapp")
+
+# REST (same hybrid pipeline)
 curl -X POST http://127.0.0.1:8765/v1/chunks/search \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"query":"auth bearer","scope":"project:myapp","limit":5}'
-
-# MCP — Claude Code, Cursor, etc. call this directly
-search_code(query="how does auth work", scope="project:myapp")
 ```
 
 Results return file path + line range + the matched chunk content, ranked by hybrid BM25 + vector + RRF.
 
 ### Stats / inspection
 
-```bash
-skein chunks stats --scope project:myapp
-# → 107 chunks across 24 files
-#   By language: python (104), sql (3)
-#   By root: myapp (107)
-
-skein chunks list --scope project:myapp --language python
-skein chunks delete-root old-experiment --scope project:myapp
-```
+Per-scope chunk counts, language breakdown, and root summaries appear
+in `skein doctor` (alongside fragment counts, value distribution, and
+inbox depth). One-off cleanup is `skein doctor --clean`.
 
 ### Why chunks separate from fragments?
 
@@ -423,12 +441,10 @@ pytest tests/ -v
 Scopes form a visibility hierarchy: `public ⊃ org ⊃ team ⊃ project ⊃ personal`.  
 A recall query on `project:foo` returns fragments from that project, its team, org, and public.
 
-```bash
-# Create a scope hierarchy
-skein scope create org:acme --name "Acme Corp"
-skein scope create team:backend --parent org:acme
-skein scope create project:api-service --parent team:backend
-```
+Scopes are inferred automatically — `skein up` picks one from
+`.skein/scope`, the git remote, or the directory name. Sub-scopes
+(`org:`, `team:`) are created by the daemon the first time a fragment
+references them; you never run a `scope create` command.
 
 ---
 
@@ -450,7 +466,7 @@ If you can't or don't want to install fastembed, fall back to keyword-only:
 skein config set embedding_provider bm25
 ```
 
-> The previous `gemini` embedding provider was removed in iter 27 — its rate limits wedged the daemon's event loop. Existing configs naming `gemini` are silently aliased to `fastembed` on next load. The **Gemini CLI** as an LLM client is unaffected and still a fully-supported sync target.
+> The previous `gemini` embedding provider was removed in iter 27 — its rate limits wedged the daemon's event loop. Existing configs naming `gemini` are silently aliased to `fastembed` on next load. **Gemini CLI** (the terminal agent) is being sunset by Google on June 18, 2026; **Antigravity** is the replacement and is already a fully-supported sync target. Skein continues to detect and connect `gemini_cli` for users still on it.
 
 ---
 

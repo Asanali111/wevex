@@ -12,13 +12,13 @@ version = "0.1.0"
 description = "Local MCP context bus for coding LLMs (Claude Code, Cursor, Codex, Gemini CLI, Antigravity, Copilot, VS Code, opencode)."
 readme = "README.md"
 requires-python = ">=3.9"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 authors = [{name = "Ameliomar Togambaev", email = "atogambaev@gmail.com"}]
 keywords = ["mcp", "llm", "context", "agents", "claude", "cursor", "codex"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
@@ -47,6 +47,8 @@ dependencies = [
   # Local-first semantic embeddings — BAAI/bge-small-en-v1.5 (384-dim).
   # Downloads ~130 MB to ~/.cache/fastembed/ on first use. No API key.
   "fastembed>=0.3.0",
+  # Hermes (Nous Research) uses YAML for its config.yaml — needed by HermesClient.
+  "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

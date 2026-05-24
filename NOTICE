@@ -1,0 +1,21 @@
+Skein — Local MCP context bus for coding LLMs
+Copyright 2026 Ameliomar Togambaev
+
+Licensed under the Apache License, Version 2.0.
+See LICENSE for the full text.
+
+This product includes software developed by third parties:
+
+  - fastembed (Apache 2.0) — local ONNX-based embeddings, no API key required.
+  - FastAPI (MIT) — HTTP transport for the daemon.
+  - Pydantic (MIT) — typed request/response models.
+  - SQLite (Public Domain) — local persistence.
+  - watchdog (Apache 2.0) — filesystem watcher.
+  - textual (MIT) — TUI for `skein tui`.
+  - rich (MIT) — terminal rendering for the CLI.
+  - httpx (BSD 3-Clause) — daemon client.
+  - click (BSD 3-Clause) — CLI argument parsing.
+  - uvicorn (BSD 3-Clause) — ASGI server.
+
+Each third-party component is governed by its own license. Apache 2.0
+attribution requirements above apply to Skein's own source.

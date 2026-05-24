@@ -126,19 +126,27 @@ def read_commits_since(repo: Path, since_sha: Optional[str] = None,
                         limit: int = 200) -> list[GitCommit]:
     """Return commits in chronological order (oldest first) up to ``limit``.
 
-    If ``since_sha`` is given, return only commits after it (exclusive).
-    Returns ``[]`` on any git failure — never raises.
+    Walks every local branch (``--branches``), not just ``HEAD`` — so commits
+    on ``feat/*`` and ``experiment/*`` branches reach Skein without first
+    being merged to main. Duplicate-SHA-across-branches is naturally collapsed
+    by git; duplicate-content-across-commits is collapsed downstream by
+    ``passive.promote_scanned_facts`` via content-stem matching.
+
+    If ``since_sha`` is given, exclude commits reachable from it. On a fresh
+    repo (no cursor) returns the most recent ``limit`` commits across all
+    branches. Returns ``[]`` on any git failure — never raises.
     """
     if not (repo / ".git").exists():
         return []
     args = [
         "git", "-C", str(repo), "log",
+        "--branches",
         f"--max-count={limit}",
         "--reverse",
         f"--format={_GIT_FORMAT}",
     ]
     if since_sha:
-        args.append(f"{since_sha}..HEAD")
+        args.append(f"^{since_sha}")
     try:
         out = subprocess.run(
             args, capture_output=True, text=True, timeout=15.0,
@@ -319,14 +327,23 @@ def commit_to_fact(commit: GitCommit, repo_path: Optional[Path] = None) -> Scann
                     section += "\n…(truncated)"
                 content = content + "\n\n" + section
 
+    # Confidence policy:
+    #   - Conventional Commits → 0.92 (auto-promotes).
+    #   - Non-conv with a substantive body (≥300 chars) → 0.90. The dev wrote
+    #     a real explanation, take them at their word even without the prefix.
+    #   - Non-conv short → 0.75 (lands in inbox for review).
+    # Auto-promote threshold is 0.90 in scanner.classify.
+    if conv:
+        confidence = 0.92
+    elif len(commit.body) >= 300:
+        confidence = 0.90
+    else:
+        confidence = 0.75
+
     return ScannedFact(
         content=content,
         type="decision",
-        # Conventional Commits messages are explicit decisions — high confidence.
-        # Non-conventional commits are still high signal vs chat: someone wrote
-        # them on purpose. Slight downgrade to land in the inbox unless they're
-        # well-formatted.
-        confidence=0.92 if conv else 0.75,
+        confidence=confidence,
         source_file=f"git:{commit.sha[:10]}",
         tags=tags,
     )

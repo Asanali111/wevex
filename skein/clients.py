@@ -27,6 +27,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 logger = logging.getLogger("skein.clients")
 
 
@@ -114,6 +116,25 @@ def _detect_any(*results: tuple[bool, str]) -> tuple[bool, str]:
     if found:
         return True, found[0][1]
     return False, "; ".join(r[1] for r in results)
+
+
+def _write_hermes_env_key(env_path: Path, key: str, value: str) -> None:
+    """Write or update KEY=VALUE in a ~/.hermes/.env file."""
+    lines = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    found = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f"{key}="):
+            lines[i] = f"{key}={value}\n"
+            found = True
+            break
+    if not found:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(f"{key}={value}\n")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text("".join(lines), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +629,486 @@ def _remove_skein_from_json(
 
 
 # ---------------------------------------------------------------------------
+# Goose (by Block)
+# ---------------------------------------------------------------------------
+
+def _goose_config_dir() -> Path:
+    """Return Goose's config directory.
+
+    - macOS / Linux: ``~/.config/goose/`` (etcetera XDG strategy, app_name only)
+    - Windows: ``%APPDATA%\\Block\\goose\\`` (etcetera Windows strategy)
+
+    Source: ``crates/goose/src/config/paths.rs`` + ``config-files.md`` in the
+    block/goose repository (verified May 2026).
+    """
+    if _is_windows():
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        return base / "Block" / "goose"
+    return Path.home() / ".config" / "goose"
+
+
+def _read_yaml(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        return data if isinstance(data, dict) else {}
+    except (yaml.YAMLError, OSError):
+        return {}
+
+
+def _write_yaml(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+
+
+class GooseClient(BaseClient):
+    id = "goose"
+    display_name = "Goose"
+    description = "Block's open-source local-first AI agent"
+
+    def detect(self) -> tuple[bool, str]:
+        return _detect_any(
+            _detect_binary("goose"),
+            _detect_path(_goose_config_dir()),
+        )
+
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
+        cfg_dir = _goose_config_dir()
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        path = cfg_dir / "config.yaml"
+        data = _read_yaml(path)
+        data.setdefault("extensions", {})
+        # Goose's streamable_http extension schema (ExtensionConfig in
+        # crates/goose/src/agents/extension.rs, serde rename = "streamable_http"):
+        #   enabled, type, name, description, uri, headers, timeout
+        data["extensions"]["skein"] = {
+            "enabled": True,
+            "type": "streamable_http",
+            "name": "skein",
+            "description": "Skein MCP context bus",
+            "uri": mcp_url,
+            "headers": {"Authorization": f"Bearer {bearer_token}"},
+            "timeout": 300,
+        }
+        _write_yaml(path, data)
+        return [str(path)]
+
+    def disconnect(self, recorded_paths=None) -> list[str]:
+        modified: list[str] = []
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        default = _goose_config_dir() / "config.yaml"
+        for raw in (*( recorded_paths or []), str(default)):
+            if raw in seen:
+                continue
+            seen.add(raw)
+            candidates.append(Path(raw))
+
+        for path in candidates:
+            if not path.exists():
+                continue
+            data = _read_yaml(path)
+            exts = data.get("extensions", {})
+            if isinstance(exts, dict) and "skein" in exts:
+                del exts["skein"]
+                _write_yaml(path, data)
+                modified.append(str(path))
+        return modified
+
+
+# ---------------------------------------------------------------------------
+# gptme
+# ---------------------------------------------------------------------------
+
+def _gptme_config_path() -> Path:
+    """gptme uses ``~/.config/gptme/config.toml`` on all platforms.
+
+    Unlike opencode/Cursor which have Windows-specific AppData paths, gptme
+    hardcodes ``os.path.expanduser("~/.config/gptme/config.toml")`` in its
+    source (gptme/config/user.py) — no platform branching.
+    """
+    return Path.home() / ".config" / "gptme" / "config.toml"
+
+
+def _strip_gptme_skein_block(text: str) -> str:
+    """Remove the skein ``[[mcp.servers]]`` block from a gptme config.
+
+    The block we write on connect looks like::
+
+        [[mcp.servers]]
+        name = "skein"
+        enabled = true
+        url = "..."
+        headers = { Authorization = "Bearer ..." }
+
+    We strip from the ``[[mcp.servers]]`` line whose content includes
+    ``name = "skein"`` through the next blank line or top-level table header.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        if stripped == "[[mcp.servers]]":
+            # Peek ahead to see if this block belongs to skein
+            j = i + 1
+            block: list[str] = [line]
+            is_skein = False
+            while j < n:
+                nxt = lines[j]
+                nxt_strip = nxt.strip()
+                # End of this block: any top-level table header or new array-of-tables
+                if nxt_strip.startswith("[[") or (
+                    nxt_strip.startswith("[") and not nxt_strip.startswith("[[")
+                ):
+                    break
+                if 'name = "skein"' in nxt_strip:
+                    is_skein = True
+                block.append(nxt)
+                j += 1
+            if is_skein:
+                # Drop the block and any single trailing blank line
+                if j < n and lines[j].strip() == "":
+                    j += 1
+                i = j
+                continue
+            else:
+                out.extend(block)
+                i = j
+                continue
+        out.append(line)
+        i += 1
+    return "".join(out)
+
+
+class GptmeClient(BaseClient):
+    id = "gptme"
+    display_name = "gptme"
+    description = "Autonomous terminal agent"
+
+    def detect(self) -> tuple[bool, str]:
+        return _detect_any(
+            _detect_binary("gptme"),
+            _detect_path(_gptme_config_path().parent),
+        )
+
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
+        path = _gptme_config_path()
+        existing = path.read_text() if path.exists() else ""
+
+        # Strip any stale skein block before appending a fresh one so that a
+        # token rotation propagates instead of being silently ignored
+        # (same lesson as the iter-18.6 Codex fix).
+        cleaned = _strip_gptme_skein_block(existing)
+
+        # gptme TOML schema (docs/mcp.rst): [[mcp.servers]] with name, enabled,
+        # url, and inline-table headers. Transport inferred from presence of url.
+        block = (
+            "\n[[mcp.servers]]\n"
+            'name = "skein"\n'
+            "enabled = true\n"
+            f'url = "{mcp_url}"\n'
+            f'headers = {{Authorization = "Bearer {bearer_token}"}}\n'
+        )
+        body = cleaned.rstrip() + "\n" if cleaned.strip() else ""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body + block)
+        return [str(path)]
+
+    def disconnect(self, recorded_paths=None) -> list[str]:
+        modified: list[str] = []
+        candidates = [Path(p) for p in (recorded_paths or [])] or [
+            _gptme_config_path(),
+        ]
+        for path in candidates:
+            if not path.exists():
+                continue
+            text = path.read_text()
+            if "skein" not in text:
+                continue
+            cleaned = _strip_gptme_skein_block(text)
+            if cleaned != text:
+                path.write_text(cleaned)
+                modified.append(str(path))
+        return modified
+
+
+# ---------------------------------------------------------------------------
+# Windsurf
+# ---------------------------------------------------------------------------
+
+class WindsurfClient(BaseClient):
+    id = "windsurf"
+    display_name = "Windsurf"
+    description = "Codeium's AI-native IDE"
+
+    def detect(self) -> tuple[bool, str]:
+        candidates = [Path.home() / ".codeium" / "windsurf"]
+        if _is_macos():
+            candidates.append(Path("/Applications/Windsurf.app"))
+        return _detect_any(
+            _detect_binary("windsurf"),
+            _detect_path(*candidates),
+        )
+
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
+        path = repo / ".windsurf" / "mcp.json"
+        data = _read_json(path)
+        data.setdefault("mcpServers", {})
+        data["mcpServers"]["skein"] = {
+            "serverUrl": mcp_url,   # Windsurf uses "serverUrl" not "url"
+            "headers": {"Authorization": f"Bearer {bearer_token}"},
+        }
+        _write_json(path, data)
+        return [str(path)]
+
+    def disconnect(self, recorded_paths=None) -> list[str]:
+        return _remove_skein_from_json(
+            recorded_paths or [],
+            ["mcpServers"],
+            default_paths=[Path.cwd() / ".windsurf" / "mcp.json"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Hermes (Nous Research)
+# ---------------------------------------------------------------------------
+
+class HermesClient(BaseClient):
+    id = "hermes"
+    display_name = "Hermes"
+    description = "Nous Research's autonomous AI agent"
+
+    def detect(self) -> tuple[bool, str]:
+        return _detect_any(
+            _detect_binary("hermes"),
+            _detect_path(Path.home() / ".hermes"),
+        )
+
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
+        import yaml
+        hermes_home = Path.home() / ".hermes"
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        config_path = hermes_home / "config.yaml"
+        env_path = hermes_home / ".env"
+
+        # Write token to .env
+        _write_hermes_env_key(env_path, "MCP_SKEIN_API_KEY", bearer_token)
+
+        # Update config.yaml
+        config = {}
+        if config_path.exists():
+            try:
+                config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                config = {}
+        config.setdefault("mcp_servers", {})["skein"] = {
+            "url": mcp_url,
+            "headers": {"Authorization": "Bearer ${MCP_SKEIN_API_KEY}"},
+        }
+        tmp = config_path.with_suffix(".yaml.tmp")
+        tmp.write_text(
+            yaml.dump(config, default_flow_style=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        os.replace(tmp, config_path)
+        return [str(config_path), str(env_path)]
+
+    def disconnect(self, recorded_paths=None) -> list[str]:
+        import yaml
+        config_path = Path.home() / ".hermes" / "config.yaml"
+        env_path = Path.home() / ".hermes" / ".env"
+        modified = []
+        if config_path.exists():
+            try:
+                config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                config = {}
+            servers = config.get("mcp_servers", {})
+            if isinstance(servers, dict) and "skein" in servers:
+                del servers["skein"]
+                if not servers:
+                    config.pop("mcp_servers", None)
+                tmp = config_path.with_suffix(".yaml.tmp")
+                tmp.write_text(
+                    yaml.dump(config, default_flow_style=False, allow_unicode=True),
+                    encoding="utf-8",
+                )
+                os.replace(tmp, config_path)
+                modified.append(str(config_path))
+        if env_path.exists():
+            _write_hermes_env_key(env_path, "MCP_SKEIN_API_KEY", "")
+            modified.append(str(env_path))
+        return modified
+
+
+# ---------------------------------------------------------------------------
+# Crush (Charm)
+# ---------------------------------------------------------------------------
+
+class CrushClient(BaseClient):
+    id = "crush"
+    display_name = "Crush"
+    description = "Charm's terminal coding agent"
+
+    def detect(self) -> tuple[bool, str]:
+        return _detect_any(
+            _detect_binary("crush"),
+            _detect_path(Path.home() / ".config" / "crush"),
+        )
+
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
+        # Crush resolves .crush.json (project-local hidden) first in its
+        # priority order: .crush.json > crush.json > $XDG_CONFIG_HOME/crush/crush.json.
+        # Writing to the project-local hidden file keeps user's global config intact.
+        path = repo / ".crush.json"
+        data = _read_json(path)
+        data.setdefault("mcp", {})
+        # Crush requires "type" to be stated explicitly — it does NOT infer
+        # transport from key presence (unlike Gemini CLI / opencode).
+        data["mcp"]["skein"] = {
+            "type": "http",
+            "url": mcp_url,
+            "headers": {"Authorization": f"Bearer {bearer_token}"},
+        }
+        _write_json(path, data)
+        return [str(path)]
+
+    def disconnect(self, recorded_paths=None) -> list[str]:
+        return _remove_skein_from_json(
+            recorded_paths or [],
+            ["mcp"],
+            default_paths=[Path.cwd() / ".crush.json"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Kiro
+# ---------------------------------------------------------------------------
+
+class KiroClient(BaseClient):
+    id = "kiro"
+    display_name = "Kiro"
+    description = "AWS's spec-first AI IDE"
+
+    def detect(self) -> tuple[bool, str]:
+        candidates = [Path.home() / ".kiro"]
+        if _is_macos():
+            candidates.append(Path("/Applications/Kiro.app"))
+        return _detect_any(
+            _detect_binary("kiro"),
+            _detect_path(*candidates),
+        )
+
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
+        # Kiro workspace config lives at .kiro/settings/mcp.json (note the
+        # extra settings/ segment — different from Cursor's .cursor/mcp.json).
+        # Kiro's schema infers transport from the presence of "url" vs
+        # "command" — no explicit "type" field, per kiro.dev/docs/mcp/configuration/.
+        path = repo / ".kiro" / "settings" / "mcp.json"
+        data = _read_json(path)
+        data.setdefault("mcpServers", {})
+        data["mcpServers"]["skein"] = {
+            "url": mcp_url,
+            "headers": {"Authorization": f"Bearer {bearer_token}"},
+        }
+        _write_json(path, data)
+        return [str(path)]
+
+    def disconnect(self, recorded_paths=None) -> list[str]:
+        return _remove_skein_from_json(
+            recorded_paths or [],
+            ["mcpServers"],
+            default_paths=[Path.cwd() / ".kiro" / "settings" / "mcp.json"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Continue.dev
+# ---------------------------------------------------------------------------
+
+class ContinueClient(BaseClient):
+    id = "continue"
+    display_name = "Continue.dev"
+    description = "Open-source AI code assistant for VS Code / JetBrains"
+
+    # Continue.dev picks up standalone block files from ~/.continue/mcpServers/.
+    # Documented at docs.continue.dev/customize/deep-dives/mcp (Quick Start).
+    # Using a dedicated file avoids touching the user's hand-edited config.yaml
+    # and makes disconnect = delete one file.
+    _BLOCK_FILENAME = "skein.yaml"
+
+    def _mcpservers_dir(self) -> Path:
+        return Path.home() / ".continue" / "mcpServers"
+
+    def _block_path(self) -> Path:
+        return self._mcpservers_dir() / self._BLOCK_FILENAME
+
+    def detect(self) -> tuple[bool, str]:
+        # ~/.continue is uniquely owned by the Continue.dev VS Code/JetBrains
+        # extension — it's a reliable detection signal.
+        return _detect_path(Path.home() / ".continue")
+
+    def connect(self, mcp_url, bearer_token, scope_handle, repo) -> list[str]:
+        import yaml  # pyyaml — already a project dep
+
+        block_dir = self._mcpservers_dir()
+        block_dir.mkdir(parents=True, exist_ok=True)
+        path = self._block_path()
+
+        # Overwrite unconditionally — same lesson as iter 18.6 Codex fix
+        # (stale tokens must not survive a token rotation).
+        data = {
+            "name": "Skein",
+            "version": "0.0.1",
+            "schema": "v1",
+            "mcpServers": [
+                {
+                    "name": "skein",
+                    "type": "streamable-http",
+                    "url": mcp_url,
+                    "requestOptions": {
+                        "headers": {
+                            "Authorization": f"Bearer {bearer_token}",
+                        },
+                    },
+                }
+            ],
+        }
+        with open(path, "w") as f:
+            yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+        return [str(path)]
+
+    def disconnect(self, recorded_paths=None) -> list[str]:
+        # The block file is entirely Skein-owned — safe to delete outright.
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        for raw in (recorded_paths or []):
+            p = Path(raw)
+            key = str(p)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(p)
+        # Always try the default location as a fallback.
+        default = self._block_path()
+        if str(default) not in seen:
+            candidates.append(default)
+
+        removed: list[str] = []
+        for path in candidates:
+            if path.exists():
+                path.unlink()
+                removed.append(str(path))
+        return removed
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -619,6 +1120,13 @@ ALL_CLIENTS: list[BaseClient] = [
     AntigravityClient(),
     OpenCodeClient(),
     CodexClient(),
+    GooseClient(),
+    GptmeClient(),
+    WindsurfClient(),
+    HermesClient(),
+    CrushClient(),
+    KiroClient(),
+    ContinueClient(),
 ]
 
 

@@ -138,4 +138,11 @@ def _seed_then_measure_latency(
     from .scenarios.token_budget import measure_recall_token_budget
     out.append(_run_safely("recall_token_budget", "efficiency",
                            lambda: measure_recall_token_budget(adapter, scope=scope)))
+    # Iter 31: daemon-RSS scenario — antibody for the ONNX-idle-unload
+    # mechanism. Measures resident-set-size before and after a forced
+    # idle window. Live mode is where the 50 MB drop floor actually
+    # bites; ephemeral mode returns informational numbers.
+    from .scenarios.daemon_rss import measure_daemon_rss
+    out.append(_run_safely("daemon_rss", "efficiency",
+                           lambda: measure_daemon_rss(adapter, scope=scope)))
     return out

@@ -255,18 +255,22 @@ def _write_cached_backend(label: str) -> None:
 
 def _quick_backend_label() -> str:
     """Cheap fallback when there's no cached label — purely file-stat based,
-    no subprocess. Used only the very first time after install."""
+    no subprocess. Used only the very first time after install.
+
+    Windows note: we deliberately do NOT probe ``schtasks`` here.
+    ``shutil.which("schtasks")`` is effectively always True on Windows
+    (it's a system binary shipped with the OS), so returning ``"schtasks"``
+    based on its presence would mislabel every externally-managed daemon
+    on a fresh install. If a real Skein scheduled task was registered,
+    ``ensure_running()`` writes the cache file at install time and the
+    cached label takes precedence over this fallback. Falling through to
+    ``"external"`` is the correct answer when no cache is present.
+    """
     sys_name = platform.system()
     if sys_name == "Darwin" and LAUNCHD_PLIST.exists():
         return "launchd"
     if SYSTEMD_UNIT_PATH.exists():
         return "systemd"
-    if sys_name == "Windows":
-        # No on-disk file for a Scheduled Task — the cached label is the
-        # only cheap signal. Otherwise we'd need a subprocess. Default to
-        # the persistent backend if we can see schtasks at all.
-        if shutil.which("schtasks"):
-            return "schtasks"
     if NOHUP_PID_FILE.exists():
         return "nohup"
     return "external"
