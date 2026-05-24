@@ -13,6 +13,8 @@ data into a ``project:ameliomar`` scope. These tests pin the regressions:
 """
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -35,6 +37,14 @@ class TestRefuseRoot:
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
         assert _refuse_root(tmp_path) is not None
 
+    @pytest.mark.skipif(
+        sys.platform.startswith("win") or os.name == "nt",
+        reason=(
+            "_refuse_root's system-root list is POSIX-only (`/`, `/tmp`, "
+            "`/etc`); the Windows equivalent (`C:\\`, `C:\\Windows`, …) "
+            "is follow-up work, not blocking for first-cut Windows support."
+        ),
+    )
     def test_refuses_system_dirs(self):
         assert _refuse_root(Path("/")) is not None
         assert _refuse_root(Path("/tmp")) is not None

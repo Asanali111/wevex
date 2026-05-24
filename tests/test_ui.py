@@ -35,13 +35,24 @@ class TestMark:
 
 class TestHomeRelative:
     def test_replaces_home(self, monkeypatch, tmp_path):
+        # Iter 27 Windows port: home_relative() doesn't normalize
+        # separators — it just swaps the leading $HOME for "~". The trailing
+        # path keeps the OS's native sep (back- vs forward-slash). Build the
+        # expected value the same way the input was built so the assertion
+        # is platform-independent.
+        import os
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
         full = str(tmp_path / "Documents" / "thing")
-        assert ui.home_relative(full) == "~/Documents/thing"
+        expected = "~" + os.sep + "Documents" + os.sep + "thing"
+        assert ui.home_relative(full) == expected
 
     def test_passthrough_for_unrelated_path(self, monkeypatch, tmp_path):
+        # Use an absolute path that is definitely outside tmp_path on both
+        # POSIX and Windows; passthrough means home_relative returns it
+        # verbatim.
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-        assert ui.home_relative("/etc/hosts") == "/etc/hosts"
+        unrelated = str(Path("/etc/hosts").resolve())  # absolute on both OSes
+        assert ui.home_relative(unrelated) == unrelated
 
 
 # ---------------------------------------------------------------------------

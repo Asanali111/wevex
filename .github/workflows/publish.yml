@@ -1,0 +1,91 @@
+name: publish
+
+# Publishes to PyPI whenever pyproject.toml version is bumped on main and
+# the new version is higher than what's already on PyPI.
+#
+# Developer workflow (per iteration):
+#   python scripts/bump_version.py [major|minor|patch]   # bumps pyproject.toml + skein/__init__.py
+#   git add pyproject.toml skein/__init__.py
+#   git commit -m "chore: bump version to X.Y.Z"
+#   git push origin main
+#   → this workflow fires, builds, and publishes to PyPI automatically.
+#
+# Required secret: PYPI_TOKEN (PyPI API token scoped to the `skn` project).
+# Set it in: repo Settings → Secrets → Actions → New repository secret.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+
+jobs:
+  publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Read package version from pyproject.toml
+        id: pkg_version
+        run: |
+          VERSION=$(python - <<'EOF'
+          import tomllib
+          with open("pyproject.toml", "rb") as f:
+              d = tomllib.load(f)
+          print(d["project"]["version"])
+          EOF
+          )
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if version already exists on PyPI
+        id: pypi_check
+        run: |
+          VERSION="${{ steps.pkg_version.outputs.version }}"
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://pypi.org/pypi/skn/$VERSION/json")
+          if [ "$HTTP" = "200" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Version $VERSION already on PyPI — skipping publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Version $VERSION not on PyPI — will publish."
+          fi
+
+      - name: Run tests before publishing
+        if: steps.pypi_check.outputs.exists == 'false'
+        run: |
+          pip install -e ".[test]"
+          pytest -q --tb=short
+        env:
+          SKEIN_EMBEDDING_PROVIDER: hash
+
+      - name: Build distribution
+        if: steps.pypi_check.outputs.exists == 'false'
+        run: |
+          pip install build
+          python -m build
+
+      - name: Publish to PyPI
+        if: steps.pypi_check.outputs.exists == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}
+
+      - name: Create GitHub release tag
+        if: steps.pypi_check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.pkg_version.outputs.version }}"
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --generate-notes \
+            dist/*.whl dist/*.tar.gz

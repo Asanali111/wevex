@@ -52,6 +52,12 @@ LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.pli
 SYSTEMD_UNIT_NAME = "skein.service"
 SYSTEMD_UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / SYSTEMD_UNIT_NAME
 
+# Windows Scheduled Task — iter 28 Windows port. Backslash creates a folder
+# grouping under Task Scheduler ▸ Task Scheduler Library ▸ Skein. Task runs
+# at user logon with restart-on-failure baked into the XML so the daemon
+# stays alive across reboots without admin elevation.
+SCHTASKS_TASK_NAME = r"Skein\Daemon"
+
 # Nohup PID + log dir live under SKEIN_HOME — these *do* move on Windows
 # (to %APPDATA%\skein\). See skein/paths.py.
 NOHUP_PID_FILE = _skein_paths.daemon_pid_file()
@@ -107,6 +113,8 @@ def ensure_running(*, persist: bool = True, base_url: str = "",
         _install_launchd(skein_bin)
     elif backend == "systemd":
         _install_systemd(skein_bin)
+    elif backend == "schtasks":
+        _install_schtasks(skein_bin)
     else:
         _start_nohup(skein_bin)
 
@@ -135,12 +143,16 @@ def stop() -> DaemonStatus:
         _uninstall_launchd()
     elif method == "systemd":
         _uninstall_systemd()
+    elif method == "schtasks":
+        _uninstall_schtasks()
     elif method == "nohup":
         _stop_nohup()
     else:
-        # Try all three to be safe
+        # Try every backend to be safe — `silent=True` makes each a no-op
+        # when the on-disk artefact for that backend is absent.
         _uninstall_launchd(silent=True)
         _uninstall_systemd(silent=True)
+        _uninstall_schtasks(silent=True)
         _stop_nohup(silent=True)
     # Invalidate the backend cache so a subsequent ensure_running takes the
     # slow path and probes fresh.
@@ -217,6 +229,13 @@ def _cached_backend() -> Optional[str]:
             return label if LAUNCHD_PLIST.exists() else None
         if label == "systemd":
             return label if SYSTEMD_UNIT_PATH.exists() else None
+        if label == "schtasks":
+            # No cheap on-disk artefact for a Windows Scheduled Task —
+            # the registration lives inside the Task Scheduler database.
+            # Trust the cached label on the warm path; the slow path's
+            # `_detect_active_backend` verifies via `schtasks /Query` if
+            # the daemon turns out to be unhealthy.
+            return label if platform.system() == "Windows" else None
         if label == "nohup":
             return label if NOHUP_PID_FILE.exists() else None
         if label == "external":
@@ -236,8 +255,19 @@ def _write_cached_backend(label: str) -> None:
 
 def _quick_backend_label() -> str:
     """Cheap fallback when there's no cached label — purely file-stat based,
-    no subprocess. Used only the very first time after install."""
-    if platform.system() == "Darwin" and LAUNCHD_PLIST.exists():
+    no subprocess. Used only the very first time after install.
+
+    Windows note: we deliberately do NOT probe ``schtasks`` here.
+    ``shutil.which("schtasks")`` is effectively always True on Windows
+    (it's a system binary shipped with the OS), so returning ``"schtasks"``
+    based on its presence would mislabel every externally-managed daemon
+    on a fresh install. If a real Skein scheduled task was registered,
+    ``ensure_running()`` writes the cache file at install time and the
+    cached label takes precedence over this fallback. Falling through to
+    ``"external"`` is the correct answer when no cache is present.
+    """
+    sys_name = platform.system()
+    if sys_name == "Darwin" and LAUNCHD_PLIST.exists():
         return "launchd"
     if SYSTEMD_UNIT_PATH.exists():
         return "systemd"
@@ -258,9 +288,16 @@ def _pick_backend(*, persist: bool) -> str:
         return "launchd"
     if sys_name == "Linux" and shutil.which("systemctl"):
         return "systemd"
-    # Windows + Linux-without-systemd land here. Windows-on-nohup survives
-    # terminal close (DETACHED_PROCESS) but not reboot; reboot persistence
-    # is a follow-up via Windows Task Scheduler.
+    # Iter 28: Windows gets schtasks (Scheduled Task) for reboot persistence —
+    # the closest analog to launchd/systemd-user. Requires no admin elevation
+    # (runs at user logon with /RL LIMITED). Falls back to nohup if the
+    # schtasks.exe binary is somehow missing — should never happen on a
+    # standard Windows install but keeps the daemon launchable on stripped
+    # Windows containers / Server Core variants.
+    if sys_name == "Windows" and shutil.which("schtasks"):
+        return "schtasks"
+    # Linux-without-systemd lands here (and the schtasks-less Windows
+    # fallback above).
     return "nohup"
 
 
@@ -280,6 +317,16 @@ def _detect_active_backend() -> str:
         )
         if "enabled" in out.stdout:
             return "systemd"
+    # Iter 28: schtasks-registered task on Windows. `schtasks /Query /TN X`
+    # exits 0 iff the task exists. Cheap (~100 ms) and gives us a definitive
+    # answer where no on-disk file does.
+    if platform.system() == "Windows" and shutil.which("schtasks"):
+        out = subprocess.run(
+            ["schtasks", "/Query", "/TN", SCHTASKS_TASK_NAME],
+            capture_output=True, text=True,
+        )
+        if out.returncode == 0:
+            return "schtasks"
     if NOHUP_PID_FILE.exists():
         return "nohup"
     # Maybe something is bound to the port that we didn't start
@@ -401,15 +448,23 @@ def relocate_venv_to_skein_home(*, package_source: Optional[Path] = None) -> Pat
 def _resolve_skein_bin() -> str:
     """Return the path to the `skein` executable to put in service files.
 
-    Prefer the running interpreter's bin/skein (so launchd uses the same venv
-    that ran `skein up`). Fall back to ``shutil.which("skein")``.
+    Prefer the running interpreter's venv (so launchd / systemd / schtasks
+    use the same venv that ran `skein up`). Fall back to PATH lookup.
+
+    Windows venvs lay the binary under ``Scripts\\skein.exe``; POSIX
+    venvs use ``bin/skein``. Check both layouts so this works regardless of
+    whether `skein up` was invoked from a Windows venv or a POSIX one.
     """
-    # If we're inside a venv, the venv's bin/skein is reliable
     if hasattr(sys, "prefix") and Path(sys.prefix).is_dir():
-        candidate = Path(sys.prefix) / "bin" / "skein"
-        if candidate.is_file():
-            return str(candidate)
-    # Otherwise PATH lookup
+        prefix = Path(sys.prefix)
+        candidates = [
+            prefix / "Scripts" / "skein.exe",  # Windows venv
+            prefix / "Scripts" / "skein",      # Windows console-script (rare)
+            prefix / "bin" / "skein",          # POSIX venv
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
     found = shutil.which("skein")
     if found:
         return found
@@ -467,6 +522,26 @@ def _read_pid_for_backend(method: str) -> Optional[int]:
                     return pid if pid > 0 else None
                 except ValueError:
                     return None
+    if method == "schtasks":
+        # `schtasks /Query /FO LIST /V /TN X` returns ~20 fields including a
+        # "PID" / "Task PID" line while the task action is running. Field
+        # labels are localised (German "Task-PID", French "PID de tâche"…)
+        # so we look for any line that ends in a number after a colon and
+        # has "PID" anywhere in the label. Returning None is OK — the
+        # health probe is the source of truth for "is it running".
+        out = subprocess.run(
+            ["schtasks", "/Query", "/TN", SCHTASKS_TASK_NAME, "/FO", "LIST", "/V"],
+            capture_output=True, text=True,
+        )
+        for line in out.stdout.splitlines():
+            stripped = line.strip()
+            if "PID" not in stripped.split(":", 1)[0].upper():
+                continue
+            _, _, value = stripped.partition(":")
+            value = value.strip()
+            if value.isdigit():
+                pid = int(value)
+                return pid if pid > 0 else None
     return None
 
 
@@ -511,7 +586,7 @@ def _install_launchd(skein_bin: str) -> None:
     )
     LAUNCHD_PLIST.write_text(plist)
 
-    # Bootstrap the user agent (idempotent: bootout first, then bootstrap)
+    # Bootstrap the user agent (idempotent: bootout first, then bootstrap).
     uid = os.getuid()
     target = f"gui/{uid}"
     subprocess.run(
@@ -528,10 +603,15 @@ def _install_launchd(skein_bin: str) -> None:
                        capture_output=True)
         subprocess.run(["launchctl", "load", "-w", str(LAUNCHD_PLIST)],
                        capture_output=True)
-    subprocess.run(
-        ["launchctl", "kickstart", "-k", f"{target}/{LAUNCHD_LABEL}"],
-        capture_output=True,
-    )
+    # Iter 28: dropped the `launchctl kickstart -k` call that used to follow
+    # bootstrap. RunAtLoad=true in the plist already starts the daemon
+    # immediately and KeepAlive=true keeps it alive. Issuing kickstart -k
+    # (the -k flag means "kill any running instance first") right after
+    # bootstrap creates a race where launchd terminates the freshly-bound
+    # daemon, the port lingers in TIME_WAIT, the respawn fails with
+    # EADDRINUSE, and the daemon needs ~25 s to stabilise. Letting the
+    # bootstrap-started instance keep running collapses cold `skein up`
+    # from ~20–25 s to ~2 s.
 
 
 def _uninstall_launchd(silent: bool = False) -> None:
@@ -620,6 +700,161 @@ def _uninstall_systemd(silent: bool = False) -> None:
             if not silent:
                 raise
     subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+
+
+# ---------------------------------------------------------------------------
+# Windows Scheduled Task backend
+# ---------------------------------------------------------------------------
+
+# Task definition XML — gives us launchd-equivalent behavior on Windows:
+#   * triggers at user logon  →  survives reboots
+#   * RestartOnFailure interval=1m count=3  →  KeepAlive analog
+#   * LogonType=InteractiveToken            →  no stored password required
+#   * RunLevel=LeastPrivilege               →  no UAC elevation
+#   * MultipleInstancesPolicy=IgnoreNew     →  schtasks /Run while the task
+#                                              is already running is a no-op,
+#                                              not a duplicate spawn
+#   * StopIfGoingOnBatteries / DisallowStartIfOnBatteries = false → keep
+#     running on laptops not plugged in (developer machines)
+#   * Hidden=true                           →  doesn't clutter the user's
+#                                              foreground UI
+#
+# The schtasks.exe CLI's command-line form (/Create /SC ONLOGON …) doesn't
+# expose RestartOnFailure or MultipleInstancesPolicy, so we go via /XML to
+# get full parity with launchd's KeepAlive semantics.
+_SCHTASKS_XML_TEMPLATE = r"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Local MCP context bus for coding LLMs (managed by `skein up`).</Description>
+    <Author>{author}</Author>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>
+    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{skein_bin}</Command>
+      <Arguments>serve</Arguments>
+      <WorkingDirectory>{cwd}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def _current_windows_user() -> str:
+    """Return ``DOMAIN\\user`` (or ``COMPUTER\\user``) for the active logon.
+
+    Used in the task XML's ``<UserId>`` field so schtasks creates a
+    user-scoped Scheduled Task (no admin needed).
+    """
+    domain = os.environ.get("USERDOMAIN") or os.environ.get("COMPUTERNAME") or ""
+    user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+    if domain and user:
+        return f"{domain}\\{user}"
+    return user or "USER"
+
+
+def _install_schtasks(skein_bin: str) -> None:
+    DAEMON_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    xml_path = _skein_paths.skein_home() / "schtasks.xml"
+    xml_path.parent.mkdir(parents=True, exist_ok=True)
+    # Escape any `<`, `>`, `&` that might live in a user's path (`My & Files\`)
+    # or domain name. schtasks parses the XML strictly and rejects unescaped
+    # entities with the unhelpful "value is incorrectly formatted" error.
+    from xml.sax.saxutils import escape as _xml_escape
+    xml = _SCHTASKS_XML_TEMPLATE.format(
+        author="skein",
+        user=_xml_escape(_current_windows_user()),
+        skein_bin=_xml_escape(skein_bin),
+        cwd=_xml_escape(str(Path.home())),
+    )
+    # schtasks /Create /XML requires the file to be UTF-16 little-endian with
+    # a BOM. Anything else (UTF-8, ASCII) silently produces "ERROR: The task
+    # XML contains a value which is incorrectly formatted or out of range."
+    xml_path.write_bytes(xml.encode("utf-16"))
+
+    # /F forces overwrite if the task already exists — keeps `skein up`
+    # idempotent across upgrades.
+    subprocess.run(
+        ["schtasks", "/Create", "/TN", SCHTASKS_TASK_NAME, "/XML",
+         str(xml_path), "/F"],
+        capture_output=True, text=True,
+    )
+    # Kick the task off immediately. /Run while the task is already running
+    # is a no-op thanks to MultipleInstancesPolicy=IgnoreNew above.
+    subprocess.run(
+        ["schtasks", "/Run", "/TN", SCHTASKS_TASK_NAME],
+        capture_output=True, text=True,
+    )
+
+
+def _uninstall_schtasks(silent: bool = False) -> None:
+    if not shutil.which("schtasks"):
+        return
+    # End any running instance first so the next bootstrap doesn't race the
+    # previous one's port binding.
+    subprocess.run(
+        ["schtasks", "/End", "/TN", SCHTASKS_TASK_NAME],
+        capture_output=True, text=True,
+    )
+    proc = subprocess.run(
+        ["schtasks", "/Delete", "/TN", SCHTASKS_TASK_NAME, "/F"],
+        capture_output=True, text=True,
+    )
+    # /Delete returns non-zero when the task doesn't exist — fine in `silent`
+    # mode (called from `stop()` to clean any leftover state from any
+    # backend). Re-raise only when the caller wants strict behaviour.
+    if proc.returncode != 0 and not silent:
+        # Distinguish "task already gone" (benign) from a real failure. The
+        # 0x80070002 ("file not found") HRESULT is what schtasks emits when
+        # /Delete targets a missing task; the wording around it is
+        # localised, so we key off the hex code only.
+        stderr = proc.stderr or ""
+        if "0x80070002" not in stderr and "ERROR" in stderr.upper():
+            raise RuntimeError(
+                f"schtasks /Delete failed: {stderr.strip()}"
+            )
+    # Best-effort cleanup of the XML scratch file.
+    try:
+        (_skein_paths.skein_home() / "schtasks.xml").unlink()
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------

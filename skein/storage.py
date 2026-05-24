@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -42,6 +43,12 @@ class Storage:
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
+        # Iter 31: per-instance id namespaces the retrieval recall cache so
+        # ephemeral test adapters and the daemon's primary Storage don't
+        # share keys. Without this, a `recall(query, scope)` cached against
+        # one Storage instance would be returned for the same query
+        # against a completely different Storage on the same scope handle.
+        self.instance_id = uuid.uuid4().hex
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
             db_path,
@@ -68,12 +75,17 @@ class Storage:
         # 30s grace before we surface "database is locked" — handles the
         # rare moment when the watcher and daemon both try to write.
         c.execute("PRAGMA busy_timeout=30000")
-        # 64 MiB page cache — covers the entire working set for typical
-        # projects (251 chunks ≈ a few MB).
-        c.execute("PRAGMA cache_size=-65536")
-        # 256 MiB memory-mapped read window — lets the kernel cache the DB
-        # without an explicit read syscall on every page.
-        c.execute("PRAGMA mmap_size=268435456")
+        # Iter 31: page cache trimmed 64 MiB → 16 MiB. The single-user
+        # daemon's working set fits in a few MB; the extra 48 MiB was
+        # giving "lightweight" the lie. Negative sign means KiB. Tunable
+        # via SKEIN_SQLITE_CACHE_KB for power users with huge stores.
+        cache_kib = int(os.environ.get("SKEIN_SQLITE_CACHE_KB", "16384"))
+        c.execute(f"PRAGMA cache_size=-{cache_kib}")
+        # Iter 31: mmap window 256 MiB → 64 MiB. Same reasoning —
+        # 256 MiB was sized for a hypothetical multi-gig store; we're
+        # at ~40 MiB today. Tunable via SKEIN_SQLITE_MMAP_MB.
+        mmap_mb = int(os.environ.get("SKEIN_SQLITE_MMAP_MB", "64"))
+        c.execute(f"PRAGMA mmap_size={mmap_mb * 1024 * 1024}")
         # FK enforcement is required for our schema's ON DELETE CASCADEs.
         c.execute("PRAGMA foreign_keys=ON")
         # Spill temp tables to memory rather than disk for the rare
@@ -303,6 +315,15 @@ class Storage:
             ("extraction_method",        "TEXT NOT NULL DEFAULT 'explicit'"),
             ("extraction_confidence",    "REAL"),
             ("value",                    "REAL NOT NULL DEFAULT 0.5"),
+            # Iter 31 — efficiency pass. Three new columns: dedupe_key
+            # lets create_fragment short-circuit identical writes (no
+            # duplicate rows when remember() is called twice with the same
+            # content); recall_hits + last_recalled_at feed the
+            # behavioural-value loop so fragments that actually get used
+            # rise to the top organically.
+            ("dedupe_key",               "TEXT"),
+            ("recall_hits",              "INTEGER NOT NULL DEFAULT 0"),
+            ("last_recalled_at",         "TEXT"),
         ]
         value_just_added = False
         for col_name, col_def in wanted:
@@ -492,6 +513,43 @@ class Storage:
                 datetime.now(timezone.utc) + timedelta(seconds=data.ttl_seconds)
             ).isoformat()
 
+        # Iter 31: dedupe shortcut for explicit writes. Compute a content
+        # hash; if an identical fragment already exists in this scope, bump
+        # its value (the "this matters again" signal) and return without
+        # inserting a duplicate row. Passive-extracted fragments
+        # (extraction_method != 'explicit') already dedupe via the inbox's
+        # uq_candidates_dedup constraint, so we skip them here to keep that
+        # path unchanged.
+        method = (data.extraction_method or "explicit").lower()
+        dedupe_key: Optional[str] = None
+        if method == "explicit":
+            import hashlib
+            tool = (data.created_by_tool or "").lower()
+            seed = f"{data.scope_id}|{data.type}|{tool}|{data.content}".encode("utf-8")
+            dedupe_key = hashlib.sha256(seed).hexdigest()[:32]
+            existing = self._conn.execute(
+                "SELECT id FROM fragments WHERE dedupe_key = ? "
+                "AND is_stale = 0 LIMIT 1",
+                (dedupe_key,),
+            ).fetchone()
+            if existing:
+                # Re-assert: nudge value + refresh updated_at, return cached.
+                self._conn.execute(
+                    "UPDATE fragments SET value = MIN(1.0, value + 0.05), "
+                    "updated_at = ? WHERE id = ?",
+                    (now, existing["id"]),
+                )
+                # Invalidate the recall cache for this scope so the bump
+                # surfaces immediately.
+                try:
+                    from . import retrieval as _retr
+                    _retr.invalidate_recall_cache(data.scope_id)
+                except Exception:
+                    pass
+                hit = self.get_fragment(existing["id"])
+                if hit is not None:
+                    return hit
+
         # Iter 25 (Q-05 phases 1+2): score the fragment's recall-time value
         # from provenance + type + content. Persisted so retrieval can apply
         # it without a recompute per query.
@@ -503,6 +561,22 @@ class Storage:
             metadata=data.metadata,
         )
 
+        # Iter 31: soft-warn at write time when a fragment's content
+        # exceeds 800 chars. Don't reject — but build the muscle memory
+        # that fragments should be short. Long-form lives in Obsidian or
+        # the commit body. The warning fires only for explicit writes
+        # (passive extraction produces inherently varied content lengths
+        # and is governed by its own confidence threshold).
+        if method == "explicit" and len(data.content or "") > 800:
+            logger.warning(
+                "Fragment exceeds 800-char soft cap (len=%d, type=%s, tool=%s). "
+                "Consider splitting into multiple fragments — long-form context "
+                "lives better in Obsidian or commit bodies. First 80 chars: %r",
+                len(data.content), data.type,
+                data.created_by_tool or "unknown",
+                (data.content or "")[:80],
+            )
+
         self._conn.execute(
             """INSERT INTO fragments
                (id, type, content, scope_id, owner_id, confidence, version,
@@ -510,11 +584,11 @@ class Storage:
                 tags, territory, source_commit_id, metadata, content_embedding,
                 created_by_tool, created_in_session_id, created_against_commit,
                 files_open_at_creation, supersedes_fragment_id,
-                extraction_method, extraction_confidence, value,
+                extraction_method, extraction_confidence, value, dedupe_key,
                 created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 0, NULL,
                        ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?,
                        ?, ?)""",
             (frag_id, data.type, data.content, data.scope_id, data.owner_id,
              data.confidence, data.ttl_seconds, expires_at,
@@ -526,8 +600,17 @@ class Storage:
              json.dumps(data.files_open_at_creation),
              data.supersedes_fragment_id,
              data.extraction_method, data.extraction_confidence, value,
+             dedupe_key,
              now, now),
         )
+
+        # Iter 31: invalidate the per-scope recall cache so the new write
+        # surfaces immediately. Cheap (in-memory dict scan).
+        try:
+            from . import retrieval as _retr
+            _retr.invalidate_recall_cache(data.scope_id)
+        except Exception:
+            pass
 
         # If this fragment supersedes another, keep the reverse pointer in sync
         # so future queries can walk the chain in either direction.
@@ -611,6 +694,14 @@ class Storage:
                 code="VERSION_CONFLICT",
             )
 
+        # Iter 31: invalidate the recall cache for the updated row's scope
+        # so the change surfaces immediately.
+        try:
+            from . import retrieval as _retr
+            _retr.invalidate_recall_cache(row["scope_id"])
+        except Exception:
+            pass
+
         return self.get_fragment(frag_id)  # type: ignore[return-value]
 
     def get_fragment(self, frag_id: str) -> Optional[Fragment]:
@@ -690,6 +781,90 @@ class Storage:
             return None
         return len(row[0]) // 4
 
+    def bump_recall_hits(self, fragment_ids: list[str]) -> None:
+        """Iter 31 (Q-05 phase 3): single batched UPDATE bumping
+        ``recall_hits`` and ``last_recalled_at`` for fragments that just
+        landed in the top-K of a real recall response. Called by
+        ``retrieval.recall`` after building results. Never raises — the
+        caller wraps in try/except so a buggy telemetry call can never
+        break recall.
+        """
+        if not fragment_ids:
+            return
+        placeholders = ",".join("?" * len(fragment_ids))
+        self._conn.execute(
+            f"""UPDATE fragments
+                   SET recall_hits = recall_hits + 1,
+                       last_recalled_at = datetime('now')
+                 WHERE id IN ({placeholders})""",
+            list(fragment_ids),
+        )
+
+    def record_recall_event(self, recall_id: str, query: str, scope_handle: str) -> None:
+        """Iter 35: capture a recall event for outcome telemetry. INSERT OR
+        IGNORE so daemon retries don't error; recall_id collision is a no-op."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO recall_events (recall_id, query, scope_handle) "
+            "VALUES (?, ?, ?)",
+            (recall_id, query[:500], scope_handle),
+        )
+
+    def link_recall_to_fragment(self, recall_id: str, fragment_id: str) -> bool:
+        """Iter 35: link a recall event to a fragment written as a follow-up.
+        Returns True if the recall_id was found and the link was created (or
+        already existed); False if the recall_id is unknown. A single recall
+        can link to many fragments — the LLM may write multiple notes from
+        one round of recall."""
+        row = self._conn.execute(
+            "SELECT 1 FROM recall_events WHERE recall_id = ?", (recall_id,),
+        ).fetchone()
+        if not row:
+            return False
+        self._conn.execute(
+            "INSERT OR IGNORE INTO recall_links (recall_id, fragment_id) "
+            "VALUES (?, ?)",
+            (recall_id, fragment_id),
+        )
+        return True
+
+    def recall_write_stats(self, hours: int = 24) -> tuple[int, int]:
+        """Iter 35: return ``(linked, total)`` for recall events in the last
+        ``hours``. ``linked`` is the count of recall_ids with at least one
+        fragment back-linked via ``from_recall``. Powers the doctor
+        recall→write rate line."""
+        cutoff = f"-{int(hours)} hours"
+        total = self._conn.execute(
+            "SELECT COUNT(*) FROM recall_events WHERE created_at >= datetime('now', ?)",
+            (cutoff,),
+        ).fetchone()[0]
+        linked = self._conn.execute(
+            "SELECT COUNT(DISTINCT re.recall_id) FROM recall_events re "
+            "JOIN recall_links rl ON rl.recall_id = re.recall_id "
+            "WHERE re.created_at >= datetime('now', ?)",
+            (cutoff,),
+        ).fetchone()[0]
+        return (int(linked), int(total))
+
+    def recent_writes_by_tool(self, hours: int = 24) -> dict[str, int]:
+        """Iter 29 day-one: return ``{created_by_tool: count}`` for non-stale
+        fragments written in the last ``hours``.
+
+        Powers the cross-LLM activity line in the MCP ``initialize.instructions``
+        greeting — the unique value prop ("cursor stored 3 decisions today, the
+        next session you open in cursor will see your decisions") is most
+        compelling when the LLM sees concrete numbers, not generic copy.
+        """
+        rows = self._conn.execute(
+            """SELECT COALESCE(created_by_tool, 'unknown') AS tool, COUNT(*) AS c
+               FROM fragments
+               WHERE is_stale = 0
+                 AND (expires_at IS NULL OR expires_at > datetime('now'))
+                 AND created_at >= datetime('now', ?)
+               GROUP BY tool ORDER BY c DESC""",
+            (f"-{int(hours)} hours",),
+        ).fetchall()
+        return {row["tool"]: int(row["c"]) for row in rows}
+
     def count_fragments_in_scope(self, scope_id: str, include_stale: bool = False) -> int:
         """Cheap existence check used by hot-path hooks to early-exit when the
         scope has no fragments — avoids the embedding+BM25+vector roundtrip."""
@@ -759,11 +934,17 @@ class Storage:
     def keyword_search(self, query: str, scope_ids: list[str],
                         type_filter: Optional[list[str]] = None,
                         include_stale: bool = False,
-                        limit: int = 20) -> list[tuple[str, float]]:
+                        limit: int = 20,
+                        value_floor: float = 0.0) -> list[tuple[str, float]]:
         """Return (fragment_id, bm25_score) pairs ordered by relevance.
 
         BM25 score from FTS5 is negative (more negative = more relevant).
         We negate it so higher = better.
+
+        Iter 31: ``value_floor`` skips low-value rows at the SQL layer
+        (cheap range-scan on idx_fragments_value). Callers pass it
+        through from retrieval.recall (0.15 by default; 0.0 when
+        ``include_stale=True``).
         """
         if not scope_ids:
             return []
@@ -780,6 +961,11 @@ class Storage:
             "AND f.is_stale = 0 "
             "AND (f.expires_at IS NULL OR f.expires_at > datetime('now'))"
         )
+        value_clause = ""
+        value_params: list[Any] = []
+        if value_floor > 0.0:
+            value_clause = "AND f.value >= ?"
+            value_params = [float(value_floor)]
 
         rows = self._conn.execute(
             f"""
@@ -790,10 +976,11 @@ class Storage:
               AND f.scope_id IN ({placeholders})
               {type_filter_clause}
               {stale_clause}
+              {value_clause}
             ORDER BY bm25(fragments_fts)
             LIMIT ?
             """,
-            [_fts_escape(query)] + scope_ids + type_params + [limit],
+            [_fts_escape(query)] + scope_ids + type_params + value_params + [limit],
         ).fetchall()
         return [(row[0], float(row[1])) for row in rows]
 
@@ -805,14 +992,19 @@ class Storage:
                        type_filter: Optional[list[str]] = None,
                        include_stale: bool = False,
                        limit: int = 20,
-                       dimension: int = 768) -> list[tuple[str, float]]:
+                       dimension: int = 768,
+                       batch_size: int = 5000,
+                       value_floor: float = 0.0) -> list[tuple[str, float]]:
         """Return (fragment_id, cosine_similarity) ordered by score.
 
-        Loads all embeddings for the scope into memory and computes cosine
-        similarity Python-side.  This is fine at <50k fragments; add ANN
-        indexing (e.g. usearch or sqlite-vec) for larger datasets.
+        Vectorised: rows are pulled in ``batch_size`` chunks, the embedding
+        BLOBs concatenated, reshaped into one float32 matrix, and scored in
+        a single matmul. For 126 fragments × 384 dim this collapses ~80ms
+        of per-row numpy churn down to <2ms. Memory bound is
+        O(batch_size · dimension · 4 bytes) — fine on any laptop.
         """
-        from .embeddings import bytes_to_vec, cosine_similarity
+        import heapq
+        import numpy as np
 
         if not scope_ids:
             return []
@@ -829,28 +1021,67 @@ class Storage:
             "AND is_stale = 0 "
             "AND (expires_at IS NULL OR expires_at > datetime('now'))"
         )
+        # Iter 31: SQL-level value floor — same rationale as keyword_search.
+        # Particularly valuable here because each retained row costs
+        # 4 × dimension bytes through Python's numpy reshape, so dropping
+        # noise early compounds.
+        value_clause = ""
+        value_params: list[Any] = []
+        if value_floor > 0.0:
+            value_clause = "AND value >= ?"
+            value_params = [float(value_floor)]
 
-        rows = self._conn.execute(
+        query_vec = np.frombuffer(query_vec_bytes, dtype=np.float32)
+        if len(query_vec) != dimension:
+            return []
+        q_norm = float(np.linalg.norm(query_vec))
+        if q_norm == 0.0:
+            return []
+        q_unit = query_vec / q_norm
+
+        cur = self._conn.execute(
             f"""SELECT id, content_embedding FROM fragments
                 WHERE content_embedding IS NOT NULL
                   AND scope_id IN ({placeholders})
                   {type_filter_clause}
-                  {stale_clause}""",
-            scope_ids + type_params,
-        ).fetchall()
+                  {stale_clause}
+                  {value_clause}""",
+            scope_ids + type_params + value_params,
+        )
 
-        if not rows:
-            return []
+        row_bytes = dimension * 4
+        heap: list[tuple[float, str]] = []
+        while True:
+            rows = cur.fetchmany(batch_size)
+            if not rows:
+                break
+            ids = [r[0] for r in rows]
+            blob = b"".join(r[1] for r in rows)
+            # Drop any rows whose stored embedding is the wrong dimension
+            # (e.g. legacy 768-dim fragments after switching providers): the
+            # graceful path is to skip them rather than corrupt the matrix.
+            if len(blob) != len(rows) * row_bytes:
+                clean_ids: list[str] = []
+                clean_bufs: list[bytes] = []
+                for rid, rbuf in rows:
+                    if rbuf is not None and len(rbuf) == row_bytes:
+                        clean_ids.append(rid)
+                        clean_bufs.append(rbuf)
+                if not clean_ids:
+                    continue
+                ids = clean_ids
+                blob = b"".join(clean_bufs)
+            mat = np.frombuffer(blob, dtype=np.float32).reshape(-1, dimension)
+            norms = np.linalg.norm(mat, axis=1)
+            norms[norms == 0] = 1.0
+            sims = mat @ q_unit / norms
+            for fid, s in zip(ids, sims.tolist()):
+                if len(heap) < limit:
+                    heapq.heappush(heap, (s, fid))
+                elif s > heap[0][0]:
+                    heapq.heapreplace(heap, (s, fid))
 
-        query_vec = bytes_to_vec(query_vec_bytes, dimension)
-        scored: list[tuple[str, float]] = []
-        for row in rows:
-            frag_vec = bytes_to_vec(row[1], dimension)
-            sim = cosine_similarity(query_vec, frag_vec)
-            scored.append((row[0], sim))
-
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:limit]
+        return sorted(((fid, float(s)) for s, fid in heap), key=lambda x: -x[1])
 
     # ------------------------------------------------------------------
     # Commit

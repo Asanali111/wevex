@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "Skein for browser LLMs",
+  "version": "0.2.0",
+  "description": "Inject local Skein context into claude.ai / chatgpt.com / gemini.google.com prompts and save assistant turns back to Skein with one click. Talks to your local Skein daemon on 127.0.0.1.",
+  "icons": {
+    "16":  "icons/skein-16.png",
+    "48":  "icons/skein-48.png",
+    "128": "icons/skein-128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Skein",
+    "default_icon": {
+      "16":  "icons/skein-16.png",
+      "48":  "icons/skein-48.png",
+      "128": "icons/skein-128.png"
+    }
+  },
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8765/*",
+    "http://127.0.0.1:8766/*",
+    "https://claude.ai/*",
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://gemini.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://claude.ai/*"],
+      "js": ["content_common.js", "content_claude.js"],
+      "css": ["badge.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      "js": ["content_common.js", "content_chatgpt.js"],
+      "css": ["badge.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://gemini.google.com/*"],
+      "js": ["content_common.js", "content_gemini.js"],
+      "css": ["badge.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

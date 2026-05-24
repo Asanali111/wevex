@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,26 @@ from skein.transcript_watcher import (
     extract_from_text,
     parse_jsonl_line,
     transcripts_for_project,
+)
+
+
+# Iter 27 Windows port: the Claude Code project-directory encoding
+# (`/Users/me/proj` → `-Users-me-proj`) was designed for POSIX paths and
+# blows up on Windows where absolute paths contain a drive-letter colon
+# (`C:\Users\me\proj` would encode to `-C:-Users-me-proj` — a colon is an
+# illegal filename character on Windows, so the directory cannot be
+# created). The transcript watcher is opt-in (SKEIN_TRANSCRIPT_WATCHER=1
+# per HANDOFF.md); a Windows-aware encoding is documented as a follow-up.
+# Path-round-trip + directory-creation tests below need a real watcher
+# directory on disk, so they're skipped on Windows. The parsing /
+# extraction tests above don't touch the filesystem and run everywhere.
+_skip_on_windows_fs = pytest.mark.skipif(
+    sys.platform.startswith("win") or os.name == "nt",
+    reason=(
+        "Transcript-watcher dir encoding (`-`-joined absolute path) is "
+        "POSIX-only; Windows needs a drive-letter-safe encoding. "
+        "Follow-up; watcher is opt-in."
+    ),
 )
 
 
@@ -64,6 +86,7 @@ def test_parse_jsonl_skips_malformed() -> None:
 # ---------------------------------------------------------------------------
 
 
+@_skip_on_windows_fs
 def test_decode_claude_project_dir_round_trip(tmp_path: Path) -> None:
     # Claude Code's encoding (replace ``/`` with ``-``) is irreversible if
     # the path itself contains hyphens. Pytest's tmp_path can contain hyphens
@@ -136,6 +159,7 @@ def test_extract_strips_secrets() -> None:
 # ---------------------------------------------------------------------------
 
 
+@_skip_on_windows_fs
 def test_transcripts_for_project_finds_jsonl(tmp_path: Path) -> None:
     # Set up a fake Claude Code root
     root = tmp_path / ".claude" / "projects"
@@ -150,6 +174,7 @@ def test_transcripts_for_project_finds_jsonl(tmp_path: Path) -> None:
     assert len(found) == 2
 
 
+@_skip_on_windows_fs
 def test_watcher_poll_once_extracts_and_advances_cursor(tmp_path: Path) -> None:
     """End-to-end: write a transcript, poll, verify candidates landed and
     the cursor moved to EOF."""
@@ -191,6 +216,10 @@ def test_watcher_poll_once_extracts_and_advances_cursor(tmp_path: Path) -> None:
         storage=storage, provider=provider,
         scope_id=scope.id, owner_id=ident.id,
         project_cwd=project, client_root=root,
+        # Iter 32: default flipped to smart-only (≥0.90 conf). The seeded
+        # messages here exercise the looser patterns (≥0.78), so explicitly
+        # disable the filter for this watcher-mechanics test.
+        smart_only=False,
     )
     n = w.poll_once()
     assert n >= 2  # parsed two non-system messages

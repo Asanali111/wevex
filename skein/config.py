@@ -26,16 +26,17 @@ DEFAULTS: dict[str, Any] = {
     # Resolved via skein.paths so Windows lands in %APPDATA%\skein\ while
     # macOS / Linux stays at ~/.config/skein/ unchanged. See skein/paths.py.
     "db_path": str(_skein_paths.default_db_path()),
-    # ``fastembed`` is the iter-23 default — local 384-dim BAAI/bge-small-en-v1.5
-    # ships in the base install so `pip install skein && skein up` is
-    # zero-config with real semantic search out of the box. No API key, no
-    # cloud round-trip, ~130 MB one-time model download. Cloud providers
-    # (``gemini``, ``openai``) are opt-in extras and take priority when their
-    # respective env vars + packages are present (see
-    # ``embeddings.best_available_provider_name``). ``bm25`` remains as the
-    # FTS5-only fallback; ``hash`` is legacy for tests only.
-    "embedding_provider": "fastembed",  # "fastembed" | "gemini" | "openai" | "bm25" | "hash"
-    "embedding_dimension": 384,
+    # ``fastembed`` is the default: local BAAI/bge-small-en-v1.5 (384-dim),
+    # no API key, ~130 MB one-time model download. ``openai`` is the opt-in
+    # cloud option. ``bm25`` is the honest FTS5-only fallback. ``hash`` is
+    # tests-only.
+    # NOTE: ``"gemini"`` is accepted as a deprecated alias and silently
+    # mapped to ``"fastembed"`` by load_config()/SkeinConfig.__init__. See
+    # skein/embeddings.py — the Gemini *embedding* API was removed in
+    # iter 27 because its rate limits wedged the daemon's event loop. The
+    # **Gemini CLI** LLM client (skein/clients.py::GeminiCLIClient) is
+    # unrelated and remains a fully-supported sync target.
+    "embedding_provider": "fastembed",
     "bearer_token": "",             # filled in by init
     "log_level": "info",
     "lease_cleanup_interval": 60,   # seconds between lease TTL cleanup
@@ -51,6 +52,32 @@ DEFAULTS: dict[str, Any] = {
     "inbox_auto_approve_interval": 300,     # seconds between inbox sweeps
     "inbox_auto_approve_threshold": 0.85,   # confidence floor for auto-promote
     "inbox_auto_reject_days": 14,           # candidates older than this get rejected
+    # Iter 34: value-aware early-reject. Transcript-* tools generate lots of
+    # mid-sentence chat noise that will never clear the 0.85 confidence bar
+    # but sits pending for 14 days under the time-based reject rule. Compute
+    # the same value the scorer would assign at promotion time; anything
+    # below the floor gets rejected on the first sweep, regardless of age.
+    # Only applied to source_tools matching ``inbox_value_floor_tool_prefix``
+    # so structured passive scanners (code-scanner, docs-watcher) are
+    # untouched. Set ``inbox_auto_reject_value_floor`` to 0 to disable.
+    "inbox_auto_reject_value_floor": 0.35,
+    "inbox_value_floor_tool_prefix": "transcript",
+    # Iter 28 boot-perf: code + docs scanner moved off the `skein up` hot
+    # path into a daemon background sweep so warm boot hits <2 s.
+    "passive_scan_interval": 300,           # seconds between scanner+docs sweeps
+    # Iter 31 efficiency: how often the daemon checks whether the
+    # FastembedProvider has been idle long enough to drop its ONNX
+    # runtime (saves ~200 MB resident memory during inactive periods).
+    # The idle window itself is the provider's _IDLE_UNLOAD_SECONDS,
+    # overridable via SKEIN_FASTEMBED_IDLE_SECONDS — this knob is just
+    # the polling cadence.
+    "embedding_idle_check_interval": 60,
+    # Iter 31 (Q-05 phase 3): how often the daemon nudges fragment.value
+    # toward its recall-hits-derived target. 6h is slow enough that a
+    # single noisy hour doesn't shift the corpus, fast enough that a week
+    # of real usage materially re-ranks. Override via env var if you want
+    # faster feedback during testing.
+    "value_decay_interval": 21600,  # 6 hours
 }
 
 
@@ -66,8 +93,13 @@ class SkeinConfig:
         self.port: int = int(merged["port"])
         self.host: str = merged["host"]
         self.db_path: str = merged["db_path"]
-        self.embedding_provider: str = merged["embedding_provider"]
-        self.embedding_dimension: int = int(merged["embedding_dimension"])
+        # Normalise the deprecated "gemini" alias at load time so callers
+        # never see it. Keeps the daemon alive on upgrade for users whose
+        # on-disk config still names the removed Gemini embedding provider.
+        ep = str(merged["embedding_provider"]).lower().strip()
+        if ep == "gemini":
+            ep = "fastembed"
+        self.embedding_provider: str = ep
         self.bearer_token: str = merged["bearer_token"]
         self.log_level: str = merged["log_level"]
         self.lease_cleanup_interval: int = int(merged["lease_cleanup_interval"])
@@ -77,6 +109,21 @@ class SkeinConfig:
         self.inbox_auto_approve_interval: int = int(merged["inbox_auto_approve_interval"])
         self.inbox_auto_approve_threshold: float = float(merged["inbox_auto_approve_threshold"])
         self.inbox_auto_reject_days: int = int(merged["inbox_auto_reject_days"])
+        self.inbox_auto_reject_value_floor: float = float(
+            merged["inbox_auto_reject_value_floor"]
+        )
+        self.inbox_value_floor_tool_prefix: str = str(
+            merged["inbox_value_floor_tool_prefix"]
+        ).strip().lower()
+        self.passive_scan_interval: int = int(merged["passive_scan_interval"])
+        self.embedding_idle_check_interval: int = int(merged["embedding_idle_check_interval"])
+        self.value_decay_interval: int = int(merged["value_decay_interval"])
+        # Drop legacy embedding_dimension if it crept in — dimension is
+        # now read from the provider class so a stale 768 can't silently
+        # zero out 384-dim fastembed vectors.
+        merged.pop("embedding_dimension", None)
+        # Normalise the persisted form too so save() emits "fastembed".
+        merged["embedding_provider"] = ep
         # keep raw dict for serialising back
         self._raw: dict[str, Any] = merged
 
@@ -137,24 +184,63 @@ def _load_dotenv_file(path: Path) -> None:
 
 
 def load_config(path: Optional[Path] = None) -> SkeinConfig:
-    """Load config from disk, then overlay SKEIN_* env vars."""
+    """Load config from disk, then overlay SKEIN_* env vars.
+
+    Performs a one-shot on-disk migration: if the config still names the
+    removed ``gemini`` embedding provider, rewrite it to ``fastembed`` so
+    the daemon doesn't crash on respawn and the user-visible config
+    matches reality. The migration logs a warning, never raises.
+    """
     p = path or _default_config_path()
     # Iter 15: source ``~/.config/skein/.env`` (alongside the JSON config) so
-    # API keys are available to whatever process is loading config — this is
-    # the only safe place to put GEMINI_API_KEY when the daemon runs under
-    # launchd, which doesn't inherit the user's shell environment.
+    # opt-in API keys (now: OPENAI_API_KEY) are available to whatever process
+    # is loading config — this is the only safe place to put them when the
+    # daemon runs under launchd, which doesn't inherit the user's shell env.
     _load_dotenv_file(p.parent / ".env")
     data: dict[str, Any] = {}
     if p.exists():
         with open(p, encoding="utf-8") as f:
             data = json.load(f)
 
+    # ---- on-disk migrations FIRST ----
+    # Run before env-var overlay so a session-scoped SKEIN_EMBEDDING_PROVIDER
+    # (e.g. tests forcing 'hash') can't mask the legacy value on disk and
+    # prevent the rewrite from firing.
+    needs_save = False
+    legacy_on_disk = str(data.get("embedding_provider", "")).lower().strip()
+    if legacy_on_disk == "gemini":
+        import logging
+        logging.getLogger("skein.config").warning(
+            "Migrating embedding_provider 'gemini' -> 'fastembed' on disk "
+            "(the Gemini embedding API was removed in iter 27). "
+            "Existing 768-dim fragment vectors will be ignored by recall "
+            "until you re-ingest — run `skein up` from each project root."
+        )
+        data["embedding_provider"] = "fastembed"
+        needs_save = True
+    if "embedding_dimension" in data:
+        # Legacy key — dimension is now read from the provider class.
+        data.pop("embedding_dimension", None)
+        needs_save = True
+
+    if needs_save and p.exists():
+        try:
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+        except OSError:
+            # A read-only or sandboxed config dir shouldn't crash the daemon;
+            # the in-memory migration (via SkeinConfig.__init__) is enough
+            # to keep the daemon alive on respawn.
+            pass
+
     # Env-var overrides: SKEIN_PORT, SKEIN_HOST, SKEIN_DB_PATH, …
+    # Applied *after* on-disk migration so legacy strings get rewritten
+    # regardless of what env vars are set.
     for key in DEFAULTS:
         env_key = f"SKEIN_{key.upper()}"
         val = os.environ.get(env_key)
         if val is not None:
-            # Attempt type coercion from the default
             default_val = DEFAULTS[key]
             if isinstance(default_val, int):
                 data[key] = int(val)

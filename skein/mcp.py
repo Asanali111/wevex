@@ -160,7 +160,7 @@ async def _dispatch(method: str, params: dict[str, Any], request: Request) -> An
         # every subsequent tool call attribute its writes to the originating
         # tool without the user managing per-client tokens.
         _remember_initiating_client(params, request, storage)
-        return _handle_initialize(params)
+        return _handle_initialize(params, storage)
 
     if method == "notifications/initialized":
         return {}  # ack
@@ -195,9 +195,12 @@ async def _dispatch(method: str, params: dict[str, Any], request: Request) -> An
         return {"prompts": _PROMPTS}
 
     if method == "prompts/get":
+        import asyncio
         name = params.get("name")
         args = params.get("arguments") or {}
-        return _get_prompt(name, args, storage)
+        # _get_prompt runs a sync recall (with embedding) — offload to
+        # a worker thread to keep the asyncio event loop responsive.
+        return await asyncio.to_thread(_get_prompt, name, args, storage)
 
     raise McpError(-32601, f"Method not found: {method}")
 
@@ -265,7 +268,7 @@ def _client_name_for_request(request: Request, storage: Any) -> str:
         return "unknown"
 
 
-def _handle_initialize(params: dict) -> dict:
+def _handle_initialize(params: dict, storage: Any) -> dict:
     return {
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "serverInfo": {"name": "skein", "version": "0.1.0"},
@@ -278,8 +281,66 @@ def _handle_initialize(params: dict) -> dict:
         # SHOULD include in its system prompt. We use it to auto-inject the
         # recall-first guidance — avoids the AI consumer needing to be told
         # by the user/AGENTS.md to call `recall` first on every turn.
-        "instructions": _RECALL_FIRST_TEXT,
+        # Iter 29 day-one: the text is now dynamic — appends a "this project"
+        # block with fragment count + last-24h cross-LLM activity. Empty
+        # stores get a starter prompt instead of a passive welcome.
+        "instructions": _build_initialize_instructions(storage),
     }
+
+
+def _build_initialize_instructions(storage: Any) -> str:
+    """Render the dynamic onboarding greeting that ships in the MCP
+    ``initialize.instructions`` field on every connection.
+
+    Three blocks: the static recall-first rules, then per-DB state
+    (fragment count + last-24h cross-LLM activity), then a one-line
+    "what to try first" tailored to whether the store is empty or full.
+    """
+    try:
+        stats = storage.stats()
+        fragment_count = int(stats.get("fragments", 0))
+    except Exception:
+        fragment_count = 0
+    try:
+        activity = storage.recent_writes_by_tool(hours=24)
+    except Exception:
+        activity = {}
+
+    lines: list[str] = [_RECALL_FIRST_TEXT.rstrip(), ""]
+
+    if fragment_count == 0:
+        # Empty store — fresh install / never-used DB. Don't be cheerful;
+        # be specific about what's coming and what the LLM can do now.
+        lines.extend([
+            "Project state: no fragments stored yet. Cold-start ingest is "
+            "queued — recent git commits, README claims, and dep manifests "
+            "will appear in `recall` within ~10s. In the meantime, every "
+            "`remember` / `note_decision` call you make will be the first "
+            "thing future sessions see.",
+        ])
+    else:
+        lines.append(f"Project state: {fragment_count} fragments stored.")
+        if activity:
+            # Limit to top 4 tools so the system prompt stays tight.
+            top = sorted(activity.items(), key=lambda x: -x[1])[:4]
+            parts = [f"{tool} ({count})" for tool, count in top]
+            lines.append(
+                f"Cross-tool activity (last 24h): {', '.join(parts)}."
+            )
+        else:
+            lines.append(
+                "No writes in the last 24 h — Skein is quiet. Connecting "
+                "another LLM (`skein connect`) compounds the value: every "
+                "decision you record here surfaces in `cursor` / `codex` "
+                "sessions on the same project."
+            )
+
+    lines.extend([
+        "",
+        "Quick start: call `project_briefing` for the dashboard, or "
+        "`recall(\"<your task>\")` to load relevant context.",
+    ])
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -318,12 +379,15 @@ _TOOLS = [
             "preferences, state, requirements) matching a natural-language query. "
             "Use BEFORE reading source files when you need project history, prior "
             "decisions, or non-obvious 'why' / 'how' context. "
-            "Returns top-K in <100ms, ~30 tokens per fragment — one `recall` "
-            "typically replaces 5+ `read_file` calls. Each result carries a "
+            "Returns top-K in <100ms; each result is rendered as a ≤80-token "
+            "snippet (call `recall_one(fragment_id)` for the full text of any "
+            "result you want to dig into). One narrow `recall` typically "
+            "replaces 5+ `read_file` calls. Each result carries a "
             "`quality` bucket (high/medium/low/none) derived from the underlying "
             "cosine similarity; if the top result is `quality=none`, Skein has "
             "no high-signal context for that query and you should fall back to "
-            "source. Scope auto-detected from cwd."
+            "source. Scope auto-detected from cwd. Repeated identical queries "
+            "within 30 s reuse a cached response — cheap to ask twice."
         ),
         "inputSchema": {
             "type": "object",
@@ -336,7 +400,7 @@ _TOOLS = [
                     "description": "Filter by fragment type(s): preference, fact, decision, state, observation, requirement, procedure, conversation",
                 },
                 "territory": {"type": "string", "description": "Filter by territory prefix, e.g. 'backend/auth'"},
-                "limit": {"type": "integer", "default": 10, "description": "Max results (1–50)"},
+                "limit": {"type": "integer", "default": 3, "description": "Max results (1–10 typical; tail matches are usually noise — recall is most useful when narrow). Snippet rendering caps each result around 80 tokens; call recall_one(id) for full text on a specific result."},
             },
             "required": ["query"],
         },
@@ -364,7 +428,10 @@ _TOOLS = [
             "non-obvious decision so other tools (you in a later session, or "
             "other LLMs) can recall it. Dedupes by content+scope+source_tool — "
             "safe to call eagerly. Returns the fragment ID. ~5ms. "
-            "Scope auto-detected from cwd."
+            "Scope auto-detected from cwd. Pass `from_recall` with the "
+            "recall_id from a prior recall() response when this write is a "
+            "follow-up to that recall — lets Skein learn which recalls "
+            "actually produced useful context."
         ),
         "inputSchema": {
             "type": "object",
@@ -380,8 +447,32 @@ _TOOLS = [
                 "territory": {"type": "string", "description": "File/domain area, e.g. 'backend/auth'"},
                 "tags": {"type": "array", "items": {"type": "string"}},
                 "ttl_seconds": {"type": "integer", "description": "TTL override. 0 = permanent."},
+                "from_recall": {"type": "string", "description": "Optional recall_id from a prior recall() this write follows from. Lets Skein link recalls to outcomes for value tuning."},
             },
             "required": ["content", "type"],
+        },
+    },
+    {
+        "name": "note",
+        "description": (
+            "ONE-ARGUMENT capture — pass any sentence-or-paragraph you want "
+            "future sessions to inherit, the daemon classifies type/tags/value "
+            "automatically. Use this when you just shipped something, "
+            "finalized a plan, or hit a non-obvious gotcha and would otherwise "
+            "skip `remember` because of the type/tags ceremony. ~5ms. "
+            "Scope auto-detected. ALWAYS prefer this over leaving the insight "
+            "in chat — chat evaporates between sessions; notes don't. "
+            "Pass `from_recall` with the recall_id from a prior recall() "
+            "response when this note follows from that recall."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "What to remember (free text)"},
+                "scope": {"type": "string", "description": "Scope handle. Omit to auto-detect."},
+                "from_recall": {"type": "string", "description": "Optional recall_id from a prior recall() this note follows from. Lets Skein link recalls to outcomes for value tuning."},
+            },
+            "required": ["content"],
         },
     },
     {
@@ -728,6 +819,7 @@ async def _call_tool(
     provider: Any,
     request: Request,
 ) -> dict:
+    import asyncio
     from .auth import token_prefix
     from .config import get_config
     from .models import (
@@ -817,41 +909,145 @@ async def _call_tool(
 
     # ---- recall ----
     if name == "recall":
+        import asyncio
         from .events import log_event
         req = RecallRequest(
             query=args["query"],
             scope=args["scope"],
             types=args.get("types"),
             territory=args.get("territory"),
-            limit=args.get("limit", 10),
+            limit=args.get("limit", 3),
         )
-        response = do_recall(req, storage, provider)
+        # Iter 35: mint a recall_id for outcome telemetry. The LLM passes it
+        # back via remember(from_recall=...) or note(from_recall=...) when
+        # the recall actually informed a write. Cheap to record, lets the
+        # value-decay loop later learn from outcomes instead of hit counts.
+        recall_id = secrets.token_hex(6)
+        try:
+            storage.record_recall_event(recall_id, args["query"], args["scope"])
+        except Exception:
+            logger.warning("record_recall_event failed; continuing", exc_info=True)
+        # Offload to a worker thread — do_recall's embedding call + SQLite
+        # queries are synchronous and would otherwise block the asyncio
+        # event loop (and /health) during fastembed's first-call warm-up
+        # or any slow embed/search.
+        response = await asyncio.to_thread(do_recall, req, storage, provider)
         log_event("recall", scope=args["scope"], query=args["query"][:120], hits=response.total)
+        _recall_footer = (
+            f"\n[skein:recall_id={recall_id}] "
+            f"— pass via remember(from_recall=\"{recall_id}\") or "
+            f"note(from_recall=\"{recall_id}\") if this informs a write"
+        )
+        # Iter 32: machine-readable relevance signal. Browser extension reads
+        # the marker on line 1 and skips prompt injection when relevance is
+        # "low" or "none" — the headline token-waste fix from this iter.
         if not response.results:
-            return _tool_text("No relevant context found.")
-        # iter 24: lead with the quality bucket — it's the only signal callers
-        # can route on without knowing what RRF/BM25/cosine look like.
+            _relevance = "none"
+        else:
+            _relevance = response.results[0].quality  # high|medium|low|none
+        _marker = f"[skein:relevance={_relevance}]"
+        # Iter 29 day-one: empty-OR-low-quality recall offers a write
+        # suggestion. With hybrid BM25+vector+RRF, true `[]` results are
+        # rare — but a top-quality of "none" means Skein has nothing
+        # high-signal for the query. Both cases deserve the same nudge.
+        is_low_signal = (
+            not response.results
+            or response.results[0].quality == "none"
+        )
+        if is_low_signal:
+            query = args.get("query", "")
+            # Filters: real-question shape (≥10 chars + whitespace). Skips
+            # one-word "test" / "foo" probes that don't make good writes.
+            if len(query) >= 10 and " " in query.strip():
+                escaped = query.replace('"', '\\"')[:120]
+                # Iter 30 wording fix: "Found 0 fragments" reads as "the
+                # store has 0 fragments total" — misleading users into
+                # thinking Skein is empty when actually the store has
+                # plenty and just nothing matches this specific query.
+                # Always state the total so the failure mode is unambiguous.
+                try:
+                    total_in_scope = storage.count_fragments_in_scope(
+                        response.scope if hasattr(response, "scope") else args["scope"],
+                    )
+                except Exception:
+                    total_in_scope = None
+                total_note = (
+                    f" (Skein has {total_in_scope} fragments in this scope, "
+                    "none of them semantically related to your query.)"
+                    if total_in_scope is not None and total_in_scope > 0
+                    else ""
+                )
+                if not response.results:
+                    preface = (
+                        f"No fragment in Skein matched {query!r}.{total_note} "
+                    )
+                else:
+                    preface = (
+                        f"No high-signal match for {query!r} — the top of "
+                        f"{response.total} candidate fragments scored as "
+                        f"low-signal (quality=none).{total_note} "
+                    )
+                # Iter 32 drift nudge: when nothing matched AND nothing has
+                # been written recently across any tool, hint that this scope
+                # is going cold — the calling LLM might be the one to add to it.
+                try:
+                    recent_total = sum(storage.recent_writes_by_tool(hours=24).values())
+                except Exception:
+                    recent_total = None
+                drift_hint = ""
+                if recent_total == 0:
+                    drift_hint = (
+                        " No fragments have been written across any tool in "
+                        "the last 24h — if you're working through something "
+                        "load-bearing, this scope is the place to capture it."
+                    )
+                suggestion = (
+                    f"{_marker}\n"
+                    f"{preface}"
+                    f"If you have context for this, call "
+                    f"`remember(content=\"<your answer or decision>\", "
+                    f"type=\"fact\", scope=\"{args['scope']}\", "
+                    f"from_recall=\"{recall_id}\")` so the "
+                    f"next session (or another LLM working on this project) "
+                    f"sees it. Suggested writeup query: \"{escaped}\".{drift_hint}"
+                    f"{_recall_footer}"
+                )
+                return _tool_text(suggestion)
+            if not response.results:
+                return _tool_text(f"{_marker}\nNo relevant context found.{_recall_footer}")
+            # Low-signal but unusable query — fall through to normal rendering.
+        # Iter 31: snippet-by-default rendering. Drops average payload from
+        # ~750 tokens/fragment to ≤80 by truncating content to a 320-char
+        # query-aware window AND stripping the per-line diagnostic chrome
+        # (cos=, id=, quality=) — those facts live in a single quality
+        # banner now and full diagnostics are available via recall_one.
         top_quality = response.results[0].quality
-        header = f"Found {response.total} fragments for query: {response.query!r}"
+        top_cos = response.results[0].cosine
+        cos_note = f", top cos={top_cos:.2f}" if top_cos is not None else ""
+        header = (
+            f"{response.total} matches for "
+            f"{response.query!r} (top quality={top_quality}{cos_note})"
+        )
         if top_quality == "none":
-            header += (
-                "\n[top match is low-signal — Skein lacks high-quality context "
-                "for this query; fall back to source.]"
-            )
+            header += "\n[top match is low-signal — fall back to source.]"
         elif top_quality == "low":
             header += "\n[top match is low quality — verify before relying.]"
-        lines = [header + "\n"]
+
+        lines = [_marker, header, ""]
+        any_truncated = False
         for r in response.results:
             f = r.fragment
-            territory_note = f" [{f.territory}]" if f.territory else ""
             tags_note = f" #{' #'.join(f.tags)}" if f.tags else ""
-            cos_note = f" cos={r.cosine:.2f}" if r.cosine is not None else ""
+            snippet, truncated = _snippet(f.content or "", response.query)
+            any_truncated = any_truncated or truncated
+            lines.append(f"- [{f.type}{tags_note} id={f.id[:8]}…] {snippet}")
+        if any_truncated:
+            lines.append("")
             lines.append(
-                f"[{r.rank}] {f.type.upper()}{territory_note}{tags_note} "
-                f"(quality={r.quality}{cos_note}, id={f.id[:8]}…)\n"
-                f"  {f.content}\n"
+                "Snippets shown. Call `recall_one(fragment_id)` "
+                "for full text on any result."
             )
-        return _tool_text("\n".join(lines))
+        return _tool_text("\n".join(lines) + _recall_footer)
 
     # ---- recall_one ----
     if name == "recall_one":
@@ -889,7 +1085,7 @@ async def _call_tool(
         from .models import CommitCreate
         embedding_bytes = None
         try:
-            vec = provider.embed_one(args["content"])
+            vec = await asyncio.to_thread(provider.embed_one, args["content"])
             embedding_bytes = vec_to_bytes(vec)
         except Exception:
             pass
@@ -908,7 +1104,83 @@ async def _call_tool(
             "remember", scope=args["scope"], fragment_id=frag.id,
             type=frag.type, preview=args["content"][:80],
         )
-        return _tool_text(f"Stored fragment {frag.id[:8]}… (type={frag.type})")
+        # Iter 35: link to originating recall if the LLM passed one.
+        link_note = ""
+        from_recall = args.get("from_recall")
+        if from_recall:
+            try:
+                linked = storage.link_recall_to_fragment(from_recall, frag.id)
+                if linked:
+                    link_note = f" [linked to recall {from_recall[:8]}…]"
+            except Exception:
+                logger.warning("link_recall_to_fragment failed", exc_info=True)
+        return _tool_text(f"Stored fragment {frag.id[:8]}… (type={frag.type}){link_note}")
+
+    # ---- note (iter 32: low-friction one-arg capture) ----
+    if name == "note":
+        content = args["content"]
+        # Cheap type inference so the daemon doesn't need an LLM round-trip.
+        # value.py will compute the real ranking value at create_fragment time.
+        import re as _re_note
+        lower = content.lower().lstrip()
+        if _re_note.match(r"(decided|concluded|chose|we will|iter\s+\d+\s+(shipped|complete|done))", lower):
+            inferred_type = "decision"
+        elif _re_note.match(r"(todo|fixme|must |should |need to)", lower):
+            inferred_type = "requirement"
+        elif _re_note.match(r"(prefer |use \w+ over|always use|never use)", lower):
+            inferred_type = "preference"
+        else:
+            inferred_type = "fact"
+
+        scope = _ensure_scope(args["scope"])
+        from .embeddings import vec_to_bytes
+        from .models import CommitCreate
+        embedding_bytes = None
+        try:
+            vec = await asyncio.to_thread(provider.embed_one, content)
+            embedding_bytes = vec_to_bytes(vec)
+        except Exception:
+            pass
+        commit = storage.create_commit(CommitCreate(
+            author_id=owner_id, scope_id=scope.id,
+            message=f"[mcp] note: {content[:60]}",
+        ))
+        frag = storage.create_fragment(
+            FragmentCreate(
+                content=content, type=inferred_type,
+                scope_id=scope.id, owner_id=owner_id,
+                created_by_tool=client_name,
+                created_in_session_id=session_id,
+                created_against_commit=git_head,
+                files_open_at_creation=files_open,
+                extraction_method="explicit",
+                extraction_confidence=1.0,
+            ),
+            commit_id=commit.id, embedding=embedding_bytes,
+        )
+        storage._conn.execute(
+            "UPDATE commits SET fragments_added = ? WHERE id = ?",
+            (f'["{frag.id}"]', commit.id),
+        )
+        from .events import log_event
+        log_event(
+            "note", scope=args["scope"], fragment_id=frag.id,
+            type=inferred_type, preview=content[:80],
+        )
+        # Iter 35: link to originating recall if the LLM passed one.
+        link_note = ""
+        from_recall = args.get("from_recall")
+        if from_recall:
+            try:
+                linked = storage.link_recall_to_fragment(from_recall, frag.id)
+                if linked:
+                    link_note = f" [linked to recall {from_recall[:8]}…]"
+            except Exception:
+                logger.warning("link_recall_to_fragment failed", exc_info=True)
+        return _tool_text(
+            f"Noted as {inferred_type} (id={frag.id[:8]}…).{link_note} "
+            f"Skein classified it automatically — call recall_one if you need to verify."
+        )
 
     # ---- note_decision ----
     if name == "note_decision":
@@ -925,7 +1197,7 @@ async def _call_tool(
         from .models import CommitCreate
         embedding_bytes = None
         try:
-            vec = provider.embed_one(full_content)
+            vec = await asyncio.to_thread(provider.embed_one, full_content)
             embedding_bytes = vec_to_bytes(vec)
         except Exception:
             pass
@@ -1018,7 +1290,7 @@ async def _call_tool(
 
         embedding_bytes = None
         try:
-            vec = provider.embed_one(new_content)
+            vec = await asyncio.to_thread(provider.embed_one, new_content)
             embedding_bytes = vec_to_bytes(vec)
         except Exception:
             pass
@@ -1093,22 +1365,48 @@ async def _call_tool(
             source_root=args.get("source_root"),
             limit=args.get("limit", 8),
         )
-        response = search_chunks(req, storage, provider)
+        # Offloaded for the same reason as do_recall above — keeps the
+        # event loop responsive to /health during fastembed warm-up.
+        response = await asyncio.to_thread(search_chunks, req, storage, provider)
         if not response.results:
             return _tool_text(
                 f"No code chunks found for {response.query!r}.\n"
                 f"Has the codebase been ingested? Run `skein ingest <path>` first."
             )
-        lines = [f"Found {response.total} code chunks for query: {response.query!r}\n"]
+        # Iter 31: same snippet + quality-banner treatment as `recall`.
+        # Each chunk renders as `file.py:start-end [lang sym] <snippet>`
+        # in the grep-and-Read-replace shape — lead with the location so
+        # the LLM can act on it immediately. Per-line diagnostic chrome
+        # (cos=, quality=) collapsed into one header banner.
+        top_quality = response.results[0].quality
+        top_cos = response.results[0].cosine
+        cos_note = f", top cos={top_cos:.2f}" if top_cos is not None else ""
+        header = (
+            f"{response.total} code chunks for {response.query!r} "
+            f"(top quality={top_quality}{cos_note})"
+        )
+        if top_quality == "none":
+            header += "\n[top match is low-signal — fall back to grep / Read.]"
+        elif top_quality == "low":
+            header += "\n[top match is low quality — verify before relying.]"
+
+        lines = [header, ""]
+        any_truncated = False
         for r in response.results:
             c = r.chunk
             sym = f" {c.symbol_name}" if c.symbol_name else ""
             lang = f" ({c.language})" if c.language else ""
-            cos_note = f" cos={r.cosine:.2f}" if r.cosine is not None else ""
+            snippet, truncated = _snippet(c.content or "", response.query)
+            any_truncated = any_truncated or truncated
             lines.append(
-                f"[{r.rank}] {c.source_path}:{c.line_start}-{c.line_end}{lang}{sym}  "
-                f"quality={r.quality}{cos_note}\n"
-                f"```{c.language or ''}\n{c.content}\n```\n"
+                f"- {c.source_path}:{c.line_start}-{c.line_end}{lang}{sym}\n"
+                f"  {snippet}"
+            )
+        if any_truncated:
+            lines.append("")
+            lines.append(
+                "Snippets shown. Open the file at the indicated lines for "
+                "full context."
             )
         return _tool_text("\n".join(lines))
 
@@ -1186,7 +1484,7 @@ async def _call_tool(
             from .models import RecallRequest
             from .retrieval import recall as do_recall
             req = RecallRequest(query=query, scope=scope_handle, limit=limit)
-            resp = do_recall(req, storage, provider)
+            resp = await asyncio.to_thread(do_recall, req, storage, provider)
             candidates = [r.fragment for r in resp.results[:limit]]
         if not candidates:
             return _tool_text(
@@ -1370,23 +1668,32 @@ working on this project. Other agents (Claude Code, Cursor, Codex, Gemini \
 CLI, Antigravity, …) may have already stored decisions, observations, and \
 codebase chunks here.
 
-Rules — apply on every turn:
+YOUR JOB: leave the store better than you found it. Read what's there, \
+write what's missing.
+
+READ rules — apply on every turn:
 
 1. Before answering ANY question about this project's code, decisions, \
-history, or architecture, call the `recall` tool first. Pass the user's \
-question (or your task) as the query.
-2. For code-level questions ("where is X defined?", "how does Y work?"), \
-also call `search_code` to retrieve relevant codebase chunks.
-3. If `recall` and `search_code` return nothing, say "I don't have context \
-on that yet" — do not invent details.
-4. After you make a non-trivial decision, finalize a plan, finish a task, \
-or learn something the next agent will need, call `remember` (or \
-`note_decision` for architectural choices) so future sessions inherit it.
-5. Treat the returned fragments as authoritative project state. Prefer \
-them over your prior assumptions.
+history, or architecture, call the `recall` tool first.
+2. For code-level questions ("where is X defined?"), also call \
+`search_code`.
+3. `recall` returns ≤80-token snippets. For full text, `recall_one(id)`.
+4. If `recall` returns nothing, say "I don't have context on that yet" — \
+do not invent details.
+
+WRITE rules — apply at the end of every iteration:
+
+5. After shipping a feature, finalizing a plan, picking an approach, or \
+hitting a non-obvious gotcha, call `note(content="…")` — ONE argument, \
+daemon classifies automatically. This is the cheapest write tool; reach \
+for it the moment you'd otherwise leave the insight only in chat. Chat \
+evaporates between sessions; notes don't.
+6. For load-bearing architectural choices with structured rationale, \
+use `note_decision(content, alternatives, rationale)`. For long-form \
+context, `remember(content, type)` with the right type.
 
 Skein is the single source of truth for cross-session, cross-agent project \
-context. Use it eagerly.
+context. Read eagerly; write often.
 """
 
 
@@ -1476,6 +1783,55 @@ def _get_prompt(name: str, args: dict, storage: Any) -> dict:
 
 def _tool_text(text: str) -> dict:
     return {"content": [{"type": "text", "text": text}]}
+
+
+def _snippet(content: str, query: str, max_chars: int = 320) -> tuple[str, bool]:
+    """Iter 31: return a query-window-aware snippet of ``content``.
+
+    If the full content fits within ``max_chars``, return it unchanged.
+    Otherwise locate the first query-term hit in ``content`` and return
+    a window of ``max_chars`` characters centered there, with ``…``
+    markers when truncated. Falls back to a head-truncation if no term
+    hits (rare for hybrid RRF results — keyword hits guarantee at least
+    one token overlap).
+
+    Returns ``(snippet, truncated)`` so the renderer can decide whether
+    to append the "call recall_one for full text" footer.
+
+    Why these bounds: 320 chars ≈ 80 tokens, the rough budget the AGENTS.md
+    description has historically advertised ("≈30 tokens per fragment").
+    We aim higher so a single snippet usually contains the actionable
+    sentence; tail matches at rank 4+ still cost less than the previous
+    full-content render.
+    """
+    text = content or ""
+    if len(text) <= max_chars:
+        return text, False
+
+    # Find the first hit of any query term (case-insensitive, cheap walk).
+    lower = text.lower()
+    terms = [t for t in (query or "").lower().split() if len(t) > 2]
+    hit = -1
+    for term in terms:
+        idx = lower.find(term)
+        if idx >= 0:
+            hit = idx
+            break
+
+    if hit < 0:
+        # No matching term — head-truncate.
+        return text[:max_chars] + "…", True
+
+    # Centre a window of max_chars on the hit, clipped to bounds.
+    half = max_chars // 2
+    start = max(0, hit - half)
+    end = min(len(text), start + max_chars)
+    # Re-bias if we hit the right edge so the window stays full size.
+    if end - start < max_chars:
+        start = max(0, end - max_chars)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return f"{prefix}{text[start:end]}{suffix}", True
 
 
 def _error_response(req_id: Any, code: int, message: str,

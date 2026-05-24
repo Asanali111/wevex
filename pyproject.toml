@@ -8,22 +8,28 @@ build-backend = "setuptools.build_meta"
 # [project.scripts] below. Users install with `pip install skn`, run with
 # `skein up`.
 name = "skn"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local MCP context bus for coding LLMs (Claude Code, Cursor, Codex, Gemini CLI, Antigravity, Copilot, VS Code, opencode)."
 readme = "README.md"
 requires-python = ">=3.9"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 authors = [{name = "Ameliomar Togambaev", email = "atogambaev@gmail.com"}]
 keywords = ["mcp", "llm", "context", "agents", "claude", "cursor", "codex"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  # Iter 28 Windows port: daemon backend gains a Scheduled Task option so
+  # `skein up` produces a logon-persistent service on Windows the same way
+  # it produces a launchd agent on macOS / systemd-user unit on Linux.
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
 ]
 
 dependencies = [
@@ -41,14 +47,17 @@ dependencies = [
   # Local-first semantic embeddings — BAAI/bge-small-en-v1.5 (384-dim).
   # Downloads ~130 MB to ~/.cache/fastembed/ on first use. No API key.
   "fastembed>=0.3.0",
+  # Hermes (Nous Research) uses YAML for its config.yaml — needed by HermesClient.
+  "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
-# Cloud embedding providers — opt-in. Skein defaults to the local fastembed
+# Cloud embedding provider — opt-in. Skein defaults to the local fastembed
 # provider so `pip install skein && skein up` is zero-config.
-gemini = ["google-genai>=0.3"]
+# (The Gemini embedding provider was removed in iter 27; see
+# skein/embeddings.py module docstring. The Gemini CLI as an LLM client
+# is unrelated and remains fully supported.)
 openai = ["openai>=1.30"]
-fastembed = ["fastembed>=0.3.0"]  # alias for explicit selection; already in base
 test = [
   "pytest>=7.4",
   "pytest-asyncio>=0.23",

@@ -1,0 +1,121 @@
+/* Skein floating badge + transient toast, injected into claude.ai.
+ * Positioned absolutely so it sits above all page content but does not
+ * affect layout. Uses a high z-index since claude.ai sometimes layers
+ * modals over 9999. Avoids CSS variables and trendy units so it renders
+ * the same on every Chromium / Firefox build. */
+
+.skein-badge {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 2147483600; /* near max-int but leaves room for browser dialogs */
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 16px;
+  background: rgba(20, 20, 28, 0.92);
+  color: #f5f5f5;
+  font: 12px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: 0.01em;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  user-select: none;
+  transition: transform 80ms ease, background 120ms ease;
+}
+.skein-badge:hover {
+  transform: translateY(-1px);
+}
+.skein-badge.skein-flash {
+  transform: scale(1.08);
+}
+
+.skein-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #46d36c;
+}
+.skein-badge.skein-warn .skein-dot { background: #f4a73a; }
+.skein-badge.skein-err  .skein-dot { background: #e7553c; }
+
+.skein-label {
+  font-weight: 600;
+}
+.skein-detail {
+  color: #b6b6c0;
+  font-weight: 400;
+  font-size: 11px;
+}
+
+/* Transient toast above the prompt — used to show "recalling..." /
+ * "injected 4 lines" / errors. Stacks bottom-up if multiple fire. */
+.skein-toast {
+  position: fixed;
+  bottom: 64px;
+  right: 16px;
+  z-index: 2147483601;
+  padding: 5px 10px;
+  border-radius: 10px;
+  background: rgba(46, 88, 224, 0.95);
+  color: #fff;
+  font: 11px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  animation: skein-toast-in 200ms ease;
+}
+@keyframes skein-toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Iter 35: "Save to Skein" button injected on assistant turns. The host
+ * turn gets .skein-host so the absolute-positioned button anchors to it.
+ * Button is intentionally small and low-prominence so it doesn't fight
+ * the host site's UI. Opacity bumps on host hover. */
+.skein-host {
+  position: relative;
+}
+.skein-save-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 50;
+  padding: 3px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(120, 120, 130, 0.35);
+  background: rgba(20, 20, 28, 0.6);
+  color: #f5f5f5;
+  font: 10px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, background 120ms ease, transform 80ms ease;
+  pointer-events: auto;
+}
+.skein-host:hover .skein-save-btn,
+.skein-save-btn:focus,
+.skein-save-btn:hover {
+  opacity: 1;
+}
+.skein-save-btn:hover {
+  background: rgba(46, 88, 224, 0.92);
+  transform: translateY(-1px);
+}
+.skein-save-btn[disabled] {
+  cursor: progress;
+  opacity: 1;
+}
+.skein-save-btn.skein-save-ok {
+  background: rgba(70, 211, 108, 0.92);
+  color: #122014;
+  border-color: rgba(70, 211, 108, 0.55);
+  opacity: 1;
+}
+.skein-save-btn.skein-save-err {
+  background: rgba(231, 85, 60, 0.92);
+  color: #fff;
+  border-color: rgba(231, 85, 60, 0.55);
+  opacity: 1;
+}

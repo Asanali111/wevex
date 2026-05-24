@@ -14,6 +14,9 @@ outperforms Condorcet and individual rank learning methods."
 from __future__ import annotations
 
 import logging
+import time
+from collections import OrderedDict
+from datetime import datetime, timezone
 from typing import Optional
 
 from .embeddings import EmbeddingProvider, vec_to_bytes
@@ -27,6 +30,127 @@ from .storage import Storage
 logger = logging.getLogger("skein.retrieval")
 
 
+# ---------------------------------------------------------------------------
+# Iter 31: recall result micro-cache
+#
+# Same (scope, query, limit, types) within 30 s reuses the cached
+# RecallResponse instead of re-embedding + re-querying. Invalidated by any
+# write into the relevant scope (storage.create_fragment / update_fragment
+# call invalidate_recall_cache(scope_id)). LRU-capped at 64 entries.
+# Skip-listed when req.include_stale is True (rare debugging path).
+# ---------------------------------------------------------------------------
+
+_RECALL_CACHE_TTL_S: float = 30.0
+_RECALL_CACHE_MAX: int = 64
+_RECALL_CACHE: "OrderedDict[tuple, tuple[float, RecallResponse]]" = OrderedDict()
+# Maps scope_id → list of cache keys, so writes can invalidate cheaply.
+_RECALL_CACHE_BY_SCOPE: dict[str, set[tuple]] = {}
+
+
+def _cache_key(req: RecallRequest, storage_id: str) -> tuple:
+    """Stable hashable key for the recall cache.
+
+    Iter 31: ``storage_id`` (the per-Storage instance UUID) is part of
+    the key so multiple Storage instances on the same scope handle don't
+    accidentally share cached responses — critical for tests using fresh
+    ephemeral DBs that reuse `project:bench` as the scope name.
+    """
+    return (
+        storage_id,
+        req.scope,
+        req.query,
+        int(req.limit or 10),
+        tuple(req.types) if req.types else None,
+        req.territory,
+        tuple(req.tags) if req.tags else None,
+        bool(req.include_stale),
+    )
+
+
+def _cache_get(req: RecallRequest, storage_id: str) -> Optional[RecallResponse]:
+    if req.include_stale:
+        return None
+    key = _cache_key(req, storage_id)
+    hit = _RECALL_CACHE.get(key)
+    if hit is None:
+        return None
+    ts, response = hit
+    if (time.monotonic() - ts) > _RECALL_CACHE_TTL_S:
+        # Expired — drop it.
+        _RECALL_CACHE.pop(key, None)
+        return None
+    # Touch for LRU semantics.
+    _RECALL_CACHE.move_to_end(key)
+    return response
+
+
+def _cache_set(req: RecallRequest, response: RecallResponse,
+               scope_ids: list[str], storage_id: str) -> None:
+    if req.include_stale:
+        return
+    key = _cache_key(req, storage_id)
+    _RECALL_CACHE[key] = (time.monotonic(), response)
+    for sid in scope_ids:
+        _RECALL_CACHE_BY_SCOPE.setdefault(sid, set()).add(key)
+    if len(_RECALL_CACHE) > _RECALL_CACHE_MAX:
+        # Evict LRU. Also drop any scope-index references to the evicted key.
+        oldest_key, _ = _RECALL_CACHE.popitem(last=False)
+        for sid_set in _RECALL_CACHE_BY_SCOPE.values():
+            sid_set.discard(oldest_key)
+
+
+def invalidate_recall_cache(scope_id: Optional[str] = None) -> None:
+    """Drop cache entries. ``scope_id=None`` clears everything (used by
+    boost / bury / supersede); otherwise only entries that touched that
+    scope are removed."""
+    if scope_id is None:
+        _RECALL_CACHE.clear()
+        _RECALL_CACHE_BY_SCOPE.clear()
+        return
+    keys = _RECALL_CACHE_BY_SCOPE.pop(scope_id, set())
+    for k in keys:
+        _RECALL_CACHE.pop(k, None)
+
+
+# ---------------------------------------------------------------------------
+# Iter 31: recency decay
+#
+# Multiplier on the post-fusion score so old fragments fade unless they're
+# pinned (value==1.0 + metadata.pinned) or are foundational types
+# (requirement / procedure / preference). Half-life 60 days, floor 0.70 so
+# old-but-still-relevant decisions don't get crushed.
+# ---------------------------------------------------------------------------
+
+_RECENCY_HALFLIFE_DAYS = 60.0
+_RECENCY_FLOOR = 0.70
+_RECENCY_SKIP_TYPES = {"requirement", "procedure", "preference"}
+
+
+def _recency_multiplier(frag) -> float:
+    """Return a multiplier in [_RECENCY_FLOOR, 1.0] from frag.created_at."""
+    if frag.type in _RECENCY_SKIP_TYPES:
+        return 1.0
+    if getattr(frag, "permanent", False):
+        return 1.0
+    try:
+        # `created_at` is stored as 'YYYY-MM-DD HH:MM:SS' or ISO 8601.
+        raw = (frag.created_at or "").replace("Z", "+00:00")
+        # SQLite default is space-separated; ISO needs 'T'.
+        if "T" not in raw and " " in raw:
+            raw = raw.replace(" ", "T", 1)
+        # No tz → assume UTC.
+        if "+" not in raw and "-" not in raw[10:]:
+            raw += "+00:00"
+        ts = datetime.fromisoformat(raw)
+    except (ValueError, AttributeError):
+        return 1.0
+    age_days = (datetime.now(timezone.utc) - ts).total_seconds() / 86400.0
+    if age_days <= 0:
+        return 1.0
+    decayed = 0.5 ** (age_days / _RECENCY_HALFLIFE_DAYS)
+    return max(_RECENCY_FLOOR, decayed)
+
+
 def recall(
     req: RecallRequest,
     storage: Storage,
@@ -34,18 +158,32 @@ def recall(
     *,
     k: int = 60,            # RRF constant
     candidate_n: int = 30,  # candidates per list before fusion
+    value_floor: float = 0.05,  # iter 31: skip rubric-floor noise at SQL layer
+    # NOTE: 0.05 == the rubric minimum from value.py, so this is a no-op
+    # for the default tests but lets production callers (CLI / MCP) tune
+    # higher without changing the call shape.
 ) -> RecallResponse:
     """Main entry point for hybrid recall.
 
     Steps:
+    0. Cache check (iter 31): same (scope, query, limit, …) within 30s
+       returns the previous RecallResponse — saves ~80ms per repeat call.
     1. Resolve scope lineage (query scope + all ancestors).
     2. Embed the query.
     3. BM25 keyword search → ranked list A.
     4. Vector cosine search → ranked list B.
     5. Fuse A + B with RRF.
-    6. Hydrate top-N fragments.
-    7. Return RecallResponse.
+    6. Hydrate top-N fragments, apply value × recency multipliers.
+    7. Bump recall_hits on the top-K (fire-and-forget telemetry).
+    8. Return RecallResponse.
     """
+    # 0. Iter 31: cache check (per-Storage instance, so test fixtures and
+    # the daemon's primary storage don't share keys).
+    storage_id = getattr(storage, "instance_id", "default")
+    cached = _cache_get(req, storage_id)
+    if cached is not None:
+        return cached
+
     # 1. Scope lineage
     lineage = storage.get_scope_lineage(req.scope)
     if not lineage:
@@ -65,6 +203,8 @@ def recall(
     types = list(req.types) if req.types else None
 
     # 3. BM25 keyword search
+    # Iter 31: SQL-level value_floor — drops the noise tail before it even
+    # gets ranked. Saves work proportional to how noisy the store is.
     keyword_hits: list[tuple[str, float]] = []
     try:
         keyword_hits = storage.keyword_search(
@@ -72,6 +212,7 @@ def recall(
             type_filter=types,
             include_stale=req.include_stale,
             limit=candidate_n,
+            value_floor=value_floor if not req.include_stale else 0.0,
         )
     except Exception as e:
         logger.warning("Keyword search failed: %s", e)
@@ -86,6 +227,7 @@ def recall(
                 include_stale=req.include_stale,
                 limit=candidate_n,
                 dimension=provider.dimension,
+                value_floor=value_floor if not req.include_stale else 0.0,
             )
         except Exception as e:
             logger.warning("Vector search failed: %s", e)
@@ -102,11 +244,9 @@ def recall(
         fused = _post_filter(fused, storage, req.territory, req.tags)
 
     # 7. Hydrate. Iter 25 (Q-05): apply the per-fragment value multiplier
-    # AFTER fusion so noisy fragments fall to the bottom without being
-    # deleted from the index. Hydrating up to all fused candidates (bounded
-    # by 2 × candidate_n) is cheap because it's a single SQL IN-clause; the
-    # extra cost vs. hydrating top-K is one DB round trip on at most ~60
-    # rows. The re-sort happens here, then we slice req.limit.
+    # AFTER fusion. Iter 31: also apply a recency decay so old fragments
+    # fade unless they're foundational (requirement/procedure/preference)
+    # or pinned (value==1.0).
     frag_ids = [item[0] for item in fused]
     fragments_by_id = storage.get_fragments_by_ids(frag_ids)
 
@@ -115,7 +255,8 @@ def recall(
         frag = fragments_by_id.get(fid)
         if frag is None:
             continue
-        adjusted = rrf_score * float(frag.value)
+        recency = _recency_multiplier(frag)
+        adjusted = rrf_score * float(frag.value) * recency
         rescored.append((fid, adjusted, matched_by, raw))
     rescored.sort(key=lambda x: x[1], reverse=True)
     top = rescored[: req.limit]
@@ -135,12 +276,26 @@ def recall(
             ),
         ))
 
-    return RecallResponse(
+    response = RecallResponse(
         results=results,
         query=req.query,
         scope=req.scope,
         total=len(results),
     )
+
+    # 8. Iter 31: behavioural-value telemetry. Single batched UPDATE for
+    # the top-K only, on a real (non-cached) response. Wrapped so it can
+    # never break recall.
+    if results:
+        try:
+            storage.bump_recall_hits([r.fragment.id for r in results])
+        except Exception:
+            logger.debug("recall_hits bump failed", exc_info=True)
+
+    # 9. Iter 31: cache for 30 s
+    _cache_set(req, response, scope_ids, storage_id)
+
+    return response
 
 
 # ---------------------------------------------------------------------------

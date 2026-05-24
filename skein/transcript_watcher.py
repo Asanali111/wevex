@@ -144,6 +144,44 @@ class ExtractionPattern:
 # ---------------------------------------------------------------------------
 
 _PATTERNS: list[ExtractionPattern] = [
+    # --- iter 32: high-precision auto-promote patterns ---
+    # These catch the load-bearing sentences a coding LLM writes in an iter
+    # recap but routinely forgets to `note_decision` back to Skein. Confidence
+    # ≥ AUTO_PROMOTE_THRESHOLD (0.90) so they land as fragments without
+    # waiting in the inbox. Each pattern starts with an unambiguous signal
+    # phrase (capital-I "Iter N SHIPPED", "Decided to X", "Concluded that X")
+    # — false-positive rate in regular prose is near zero.
+    ExtractionPattern(
+        pattern=re.compile(
+            r"\bIter\s+\d+(?:\.\d+)?\s+(?:SHIPPED|shipped|complete|completed|in progress|opened|landed|done)\b[\s\-—:]*[^\n]{10,400}",
+        ),
+        type="decision", confidence=0.92,
+        content_group=0,
+    ),
+    ExtractionPattern(
+        pattern=re.compile(
+            r"\bDecided to\s+(?:use|go with|pick|choose|switch to|migrate to|drop|adopt|deprecate|ship|skip|defer)\s+([^\.\n]{4,200})",
+            re.IGNORECASE,
+        ),
+        type="decision", confidence=0.92,
+        content_prefix="Decided to ",
+    ),
+    ExtractionPattern(
+        pattern=re.compile(
+            r"\bConcluded(?:\s+that)?\s+([^\.\n]{8,300})",
+            re.IGNORECASE,
+        ),
+        type="decision", confidence=0.90,
+        content_prefix="Concluded: ",
+    ),
+    ExtractionPattern(
+        pattern=re.compile(
+            r"\b(?:Shipped|SHIPPED)\s+(iter\s+\d+(?:\.\d+)?|the\s+\w[\w\-]{2,40}(?:\s+\w[\w\-]{2,40}){0,3})[\s\-—:]*([^\n]{10,300})?",
+        ),
+        type="decision", confidence=0.90,
+        content_group=0,
+    ),
+    # --- legacy lower-confidence patterns (inbox-bound; opt-in via env) ---
     # "let's use X" / "let us use X" — high signal, user-stated decision
     ExtractionPattern(
         pattern=re.compile(
@@ -239,8 +277,16 @@ def _scrub_secrets(text: str) -> str:
     return text
 
 
-def extract_from_message(msg: ParsedMessage) -> list[ScannedFact]:
-    """Run every pattern over one parsed message. Returns 0+ candidate facts."""
+def extract_from_message(
+    msg: ParsedMessage, *, smart_only: bool = False,
+) -> list[ScannedFact]:
+    """Run every pattern over one parsed message. Returns 0+ candidate facts.
+
+    ``smart_only=True`` restricts to the high-precision (confidence ≥ 0.90)
+    pattern set. Iter 32 default for the live transcript watcher so the loose
+    patterns (which generate inbox noise) only fire when the user opts in via
+    ``SKEIN_TRANSCRIPT_WATCHER=loose``.
+    """
     out: list[ScannedFact] = []
     text = _scrub_secrets(msg.text)
     if "[REDACTED-SECRET]" in text:
@@ -250,6 +296,8 @@ def extract_from_message(msg: ParsedMessage) -> list[ScannedFact]:
         return out
     seen_contents: set = set()
     for spec in _PATTERNS:
+        if smart_only and spec.confidence < 0.90:
+            continue
         if msg.role not in spec.roles:
             continue
         for m in spec.pattern.finditer(text):
@@ -277,9 +325,13 @@ def extract_from_message(msg: ParsedMessage) -> list[ScannedFact]:
     return out
 
 
-def extract_from_text(text: str, role: str = "user") -> list[ScannedFact]:
+def extract_from_text(
+    text: str, role: str = "user", *, smart_only: bool = False,
+) -> list[ScannedFact]:
     """Convenience wrapper used by tests."""
-    return extract_from_message(ParsedMessage(role=role, text=text))
+    return extract_from_message(
+        ParsedMessage(role=role, text=text), smart_only=smart_only,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +362,7 @@ class ClaudeCodeTranscriptWatcher:
         poll_interval: float = 2.0,
         client_root: Optional[Path] = None,
         source_tool: str = "transcript-claude",
+        smart_only: bool = True,
     ) -> None:
         self.storage = storage
         self.provider = provider
@@ -319,6 +372,7 @@ class ClaudeCodeTranscriptWatcher:
         self.poll_interval = poll_interval
         self.client_root = client_root or default_claude_code_root()
         self.source_tool = source_tool
+        self.smart_only = smart_only
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -396,7 +450,7 @@ class ClaudeCodeTranscriptWatcher:
             if not msg:
                 continue
             new_msgs += 1
-            for fact in extract_from_message(msg):
+            for fact in extract_from_message(msg, smart_only=self.smart_only):
                 # Tag candidate with the originating session so archaeology
                 # can trace it back later.
                 fact.tags = list(set(fact.tags + (["session:" + msg.session_id] if msg.session_id else [])))
@@ -459,12 +513,14 @@ class MultiProjectTranscriptWatcher:
         poll_interval: float = 3.0,
         client_root: Optional[Path] = None,
         get_owner_id,           # callable() -> identity id
+        smart_only: bool = True,
     ) -> None:
         self.storage_factory = storage_factory
         self.provider = provider
         self.poll_interval = poll_interval
         self.client_root = client_root or default_claude_code_root()
         self.get_owner_id = get_owner_id
+        self.smart_only = smart_only
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -513,6 +569,7 @@ class MultiProjectTranscriptWatcher:
                     scope_id=scope_id, owner_id=owner_id,
                     project_cwd=project_path,
                     client_root=self.client_root,
+                    smart_only=self.smart_only,
                 )
                 n = w.poll_once()
                 if n:

@@ -60,9 +60,15 @@ class TestMarkConnected:
         assert not conns.is_connected("vscode")
 
     def test_paths_serialised_as_strings(self, fake_registry):
-        conns.mark_connected("cursor", [Path("/tmp/cursor/mcp.json")])
+        # Iter 27 Windows port: passing a `Path` here was being normalized
+        # to backslashes on Windows (`\tmp\cursor\mcp.json`). The test's
+        # point is "Path objects become strings in JSON"; build the input
+        # via Path() but assert against the OS-native string form so the
+        # test is platform-independent.
+        p = Path("/tmp/cursor/mcp.json")
+        conns.mark_connected("cursor", [p])
         data = json.loads(fake_registry.read_text())
-        assert data["cursor"]["config_paths"] == ["/tmp/cursor/mcp.json"]
+        assert data["cursor"]["config_paths"] == [str(p)]
 
 
 class TestMarkDisconnected:

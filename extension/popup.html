@@ -1,0 +1,122 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Skein</title>
+  <style>
+    body {
+      font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      width: 320px;
+      margin: 0;
+      padding: 14px 16px;
+      color: #222;
+      background: #fafafa;
+    }
+    h1 {
+      font-size: 14px;
+      margin: 0 0 8px;
+      letter-spacing: 0.02em;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 8px 0;
+    }
+    label {
+      color: #666;
+      font-size: 12px;
+    }
+    select, input {
+      flex: 1;
+      padding: 4px 6px;
+      font-size: 12px;
+      font-family: inherit;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      background: #fff;
+    }
+    .status {
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 3px;
+      margin: 6px 0 10px;
+    }
+    .status.ok { background: #e3f5e3; color: #1f6b1f; }
+    .status.warn { background: #fff3cd; color: #856404; }
+    .status.err { background: #f8d7da; color: #721c24; }
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+      gap: 6px;
+    }
+    .footer {
+      font-size: 11px;
+      color: #888;
+      margin-top: 12px;
+      padding-top: 8px;
+      border-top: 1px solid #eee;
+    }
+    .footer code {
+      font-size: 10px;
+      background: #eee;
+      padding: 1px 4px;
+      border-radius: 2px;
+    }
+    button {
+      font-size: 11px;
+      padding: 4px 8px;
+      border: 1px solid #ccc;
+      background: #fff;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    button:hover { background: #eee; }
+  </style>
+</head>
+<body>
+  <h1>Skein <span style="color:#999;font-weight:400;font-size:11px">· experimental</span></h1>
+
+  <div id="status" class="status warn">checking daemon…</div>
+
+  <div class="row">
+    <label>Daemon</label>
+    <input id="daemonUrl" type="text" placeholder="http://127.0.0.1:8766" />
+  </div>
+
+  <div class="row">
+    <label>Scope</label>
+    <select id="scope">
+      <option value="">— pick a scope —</option>
+    </select>
+  </div>
+
+  <div class="row">
+    <label class="toggle">
+      <input type="checkbox" id="enabled" />
+      Inject context on send
+    </label>
+  </div>
+
+  <div class="row">
+    <label>Query</label>
+    <input id="testQuery" type="text" placeholder="what to recall" />
+  </div>
+
+  <div class="row" style="justify-content: flex-end; gap: 6px;">
+    <button id="repair">Re-pair</button>
+    <button id="test">Test recall</button>
+  </div>
+
+  <div id="test-result" style="display:none; margin-top:8px; padding:6px 8px; background:#fff; border:1px solid #ddd; border-radius:3px; font-size:11px; max-height:120px; overflow:auto; white-space:pre-wrap;"></div>
+
+  <div class="footer">
+    Local-only. Talks to <code>127.0.0.1</code> via your installed Skein
+    daemon. Your prompts never leave the machine.
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -58,13 +58,22 @@ class TestBackendPicker:
         monkeypatch.setattr("shutil.which", lambda x: None)
         assert daemon_mod._pick_backend(persist=True) == "nohup"
 
-    def test_nohup_on_windows(self, monkeypatch):
-        # Iter 27 Windows port: there is no native auto-start service
-        # registration; persist=True still resolves to "nohup", which on
-        # Windows means subprocess.Popen with CREATE_NEW_PROCESS_GROUP |
-        # DETACHED_PROCESS via _proc.spawn_detached. Reboot persistence is
-        # a future Task Scheduler follow-up.
+    def test_schtasks_on_windows_with_schtasks_present(self, monkeypatch):
+        # Iter 28 Windows port: persist=True now resolves to "schtasks"
+        # (Windows Scheduled Task at user logon) so the daemon survives
+        # reboots, matching launchd / systemd-user parity.
         monkeypatch.setattr("platform.system", lambda: "Windows")
+        monkeypatch.setattr(
+            "shutil.which",
+            lambda x: r"C:\Windows\System32\schtasks.exe" if x == "schtasks" else None,
+        )
+        assert daemon_mod._pick_backend(persist=True) == "schtasks"
+
+    def test_nohup_on_windows_without_schtasks(self, monkeypatch):
+        # Server Core / nano-server / stripped containers may not ship
+        # schtasks.exe. Fall back to nohup so the daemon still launches.
+        monkeypatch.setattr("platform.system", lambda: "Windows")
+        monkeypatch.setattr("shutil.which", lambda x: None)
         assert daemon_mod._pick_backend(persist=True) == "nohup"
 
 

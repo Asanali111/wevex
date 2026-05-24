@@ -34,6 +34,30 @@ BUDGETS: Dict[str, Dict[str, Tuple[Op, float]]] = {
         "write_p95_ms": ("<=", 100.0),
         "fragments_per_sec": (">=", 20.0),
     },
+    # Iter 31 efficiency pass: snippet rendering at the MCP layer caps
+    # each rendered result around 320 chars (≈80 tokens). This budget
+    # measures the underlying fragment content lengths returned by the
+    # adapter — a smoke that catches regressions where fragments balloon
+    # past the soft 800-char write cap.
+    "recall_token_budget": {
+        "avg_chars_per_result": ("<=", 1000.0),
+        "max_chars_per_result": ("<=", 2000.0),
+        "total_chars":          ("<=", 40000.0),
+    },
+    # Iter 31 ONNX-idle-unload: after the configured idle window, the
+    # FastembedProvider drops its ONNX runtime. The expected floor is
+    # ~200 MB but a conservative 50 MB catches the case where the unload
+    # silently regresses to a no-op. The post-idle resident ceiling
+    # (350 MB) catches the related regression where the daemon's
+    # baseline RSS balloons (e.g. someone loads embeddings eagerly on
+    # every recall and the cache never drains). Both budgets only fire
+    # when the scenario returned status="pass"; the ephemeral "no
+    # unload hook" path returns status="warn" precisely so it doesn't
+    # trip these floors.
+    "daemon_rss": {
+        "idle_rss_drop_mb": (">=", 50.0),
+        "post_idle_rss_mb": ("<=", 350.0),
+    },
 }
 
 

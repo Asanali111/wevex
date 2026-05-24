@@ -82,6 +82,10 @@ def daemon_pid_file() -> Path:
     return skein_home() / "daemon.pid"
 
 
+def daemon_lock_file() -> Path:
+    return skein_home() / "daemon.lock"
+
+
 def daemon_log_dir() -> Path:
     return skein_home() / "logs"
 

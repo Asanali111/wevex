@@ -84,10 +84,15 @@ def test_default_path_honors_env(tmp_path, monkeypatch) -> None:
 
 
 def test_default_path_fallback(monkeypatch) -> None:
+    # Iter 27 Windows port: the per-user state dir lives at
+    # %APPDATA%\skein\ on Windows and ~/.config/skein/ on macOS/Linux.
+    # Assert against `paths.skein_home()` so the test follows whichever
+    # platform it runs on.
+    from skein import paths as skein_paths
     monkeypatch.delenv("SKEIN_EVENTS_PATH", raising=False)
     p = default_path()
     assert p.name == "events.jsonl"
-    assert ".config/skein" in str(p)
+    assert p.parent == skein_paths.skein_home()
 
 
 def test_logger_omits_scope_when_none(tmp_events: Path) -> None:
