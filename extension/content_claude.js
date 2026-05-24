@@ -24,6 +24,17 @@
     );
   }
 
+  // Iter 35: find rendered assistant turns for the Save-to-Skein button.
+  // Claude wraps each assistant message body in a div carrying the
+  // `font-claude-message` class. We anchor on the closest stable parent
+  // that doesn't churn between streaming and final state.
+  function findAssistantTurns() {
+    const nodes = document.querySelectorAll(
+      'div.font-claude-message, [data-testid="message-content"][data-message-author="assistant"]',
+    );
+    return Array.from(nodes);
+  }
+
   if (!globalThis.__SkeinCommon) {
     console.warn("[skein] content_common.js not loaded; aborting claude.ai script");
     return;
@@ -33,5 +44,6 @@
     siteName: "claude.ai",
     findPromptElement,
     findSendButton,
+    findAssistantTurns,
   });
 })();

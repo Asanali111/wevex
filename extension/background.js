@@ -14,7 +14,10 @@
 //   activeScope  — last-used scope handle (sticks across sessions)
 //   enabled      — global on/off; defaults true
 
-const DEFAULT_DAEMON_URL = "http://127.0.0.1:8766";
+// Iter 35: extension graduated — defaults to the production daemon (8765).
+// Users running the iter-30..34 experiment can change the URL via the
+// toolbar popup if they still want to talk to a side daemon on 8766.
+const DEFAULT_DAEMON_URL = "http://127.0.0.1:8765";
 
 // ---- storage helpers ---------------------------------------------------
 
@@ -175,6 +178,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const result = await mcpCall("tools/call", {
             name: "project_briefing",
             arguments: { scope },
+          });
+          sendResponse({ ok: true, result });
+          return;
+        }
+
+        case "note": {
+          // Iter 35: "Save to Skein" button on assistant turns. Pass the
+          // turn text straight to MCP note() — daemon classifies type +
+          // tags + value automatically. msg.content (string, required);
+          // msg.fromRecall (string, optional) for outcome linking.
+          const state = await getState();
+          const scope = msg.scope || state.activeScope;
+          if (!scope) {
+            sendResponse({ ok: false, error: "no active scope set" });
+            return;
+          }
+          if (!msg.content || typeof msg.content !== "string") {
+            sendResponse({ ok: false, error: "missing content" });
+            return;
+          }
+          const args = { content: msg.content, scope };
+          if (msg.fromRecall) args.from_recall = msg.fromRecall;
+          const result = await mcpCall("tools/call", {
+            name: "note",
+            arguments: args,
           });
           sendResponse({ ok: true, result });
           return;

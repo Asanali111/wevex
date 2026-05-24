@@ -246,6 +246,122 @@
     return { handleSubmitAttempt };
   }
 
+  // ---- Save to Skein button on assistant turns (iter 35) -------------
+  //
+  // Per-turn "Save to Skein" button. Default behavior: extract the turn's
+  // plain text (innerText), pass to background → MCP note() → daemon
+  // classifies type/tags/value automatically. Same shape on all three
+  // sites — only the assistant-turn selector differs per adapter.
+  //
+  // A WeakSet tracks elements we've already decorated so the
+  // MutationObserver doesn't double-inject when React re-renders.
+
+  const decorated = new WeakSet();
+  const saved = new WeakSet();
+
+  function defaultGetAssistantText(el) {
+    return el ? (el.innerText || el.textContent || "").trim() : "";
+  }
+
+  function makeSaveButton(turnEl, getAssistantText) {
+    const btn = document.createElement("button");
+    btn.className = "skein-save-btn";
+    btn.type = "button";
+    btn.textContent = "Save to Skein";
+    btn.title = "Save this assistant turn as a Skein note (auto-classified)";
+    btn.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (saved.has(turnEl) || btn.disabled) return;
+      if (!cached.activeScope) {
+        flashToast("Skein: pick a scope in the toolbar popup first");
+        return;
+      }
+      const text = getAssistantText(turnEl);
+      if (!text || text.length < 8) {
+        flashToast("Skein: nothing to save (turn is empty)");
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = "Saving…";
+      try {
+        const r = await new Promise((resolve) => {
+          chrome.runtime.sendMessage({ type: "note", content: text }, resolve);
+        });
+        if (!r || !r.ok) {
+          btn.textContent = "Save failed";
+          btn.classList.add("skein-save-err");
+          WARN("note failed:", r && r.error);
+          flashToast(`Skein: save failed (${r && r.error || "unknown"})`);
+          setTimeout(() => {
+            btn.disabled = false;
+            btn.classList.remove("skein-save-err");
+            btn.textContent = "Save to Skein";
+          }, 2500);
+          return;
+        }
+        saved.add(turnEl);
+        btn.textContent = "✓ Saved";
+        btn.classList.add("skein-save-ok");
+        flashToast("Skein → noted");
+      } catch (err) {
+        WARN("save error:", err);
+        btn.textContent = "Save failed";
+        btn.classList.add("skein-save-err");
+        setTimeout(() => {
+          btn.disabled = false;
+          btn.classList.remove("skein-save-err");
+          btn.textContent = "Save to Skein";
+        }, 2500);
+      }
+    }, true);
+    return btn;
+  }
+
+  function decorateAssistantTurns(siteAdapter) {
+    const findTurns = siteAdapter.findAssistantTurns;
+    if (typeof findTurns !== "function") return;
+    const getAssistantText = siteAdapter.getAssistantTurnText || defaultGetAssistantText;
+    const turns = findTurns() || [];
+    for (const turn of turns) {
+      if (!turn || decorated.has(turn)) continue;
+      const text = getAssistantText(turn);
+      if (!text || text.length < 8) continue; // streaming or empty turn
+      decorated.add(turn);
+      const btn = makeSaveButton(turn, getAssistantText);
+      // Position button inside the turn, top-right. Site CSS shouldn't
+      // need to know about us — the button is absolute-positioned and the
+      // turn becomes relative via the .skein-host class.
+      turn.classList.add("skein-host");
+      turn.appendChild(btn);
+    }
+  }
+
+  function installSaveButtons(siteAdapter) {
+    if (typeof siteAdapter.findAssistantTurns !== "function") return;
+    // Initial pass.
+    setTimeout(() => decorateAssistantTurns(siteAdapter), 1200);
+    // Watch for new turns and React re-renders. Throttled to one pass
+    // per animation frame; the page may emit dozens of mutations per
+    // streaming token.
+    let pending = false;
+    const obs = new MutationObserver(() => {
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(() => {
+        pending = false;
+        try {
+          decorateAssistantTurns(siteAdapter);
+        } catch (err) {
+          WARN("decorate failed:", err);
+        }
+      });
+    });
+    obs.observe(document.documentElement, {
+      childList: true, subtree: true,
+    });
+  }
+
   // ---- bootstrap ------------------------------------------------------
 
   async function bootstrap(siteAdapter) {
@@ -303,6 +419,10 @@
     // React-heavy SPAs may finish rendering long after document_idle;
     // give them a couple seconds.
     setTimeout(() => bootstrap(siteAdapter), 800);
+
+    // Iter 35: install Save-to-Skein buttons on assistant turns (no-op
+    // for adapters that don't expose findAssistantTurns).
+    installSaveButtons(siteAdapter);
 
     chrome.storage.onChanged.addListener((changes) => {
       LOG("state changed:", Object.keys(changes));

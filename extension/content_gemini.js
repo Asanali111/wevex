@@ -35,6 +35,19 @@
     );
   }
 
+  // Iter 35: assistant turns for Save-to-Skein. Gemini renders the
+  // model response inside `<message-content>` Angular components; some
+  // rollouts use `.model-response-text` as the primary class on the
+  // text container. We probe in priority order.
+  function findAssistantTurns() {
+    const nodes = document.querySelectorAll(
+      'message-content.model-response-text, ' +
+      'message-content[id*="model-response"], ' +
+      '.model-response-text',
+    );
+    return Array.from(nodes);
+  }
+
   if (!globalThis.__SkeinCommon) {
     console.warn("[skein] content_common.js not loaded; aborting gemini.google.com script");
     return;
@@ -44,5 +57,6 @@
     siteName: "gemini.google.com",
     findPromptElement,
     findSendButton,
+    findAssistantTurns,
   });
 })();

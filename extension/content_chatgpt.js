@@ -56,6 +56,17 @@
     document.execCommand("insertText", false, text);
   }
 
+  // Iter 35: assistant turns for Save-to-Skein. ChatGPT marks turn role
+  // explicitly via `data-message-author-role="assistant"` on the
+  // outermost turn container — that attribute has been stable across
+  // every UI revamp since 2024.
+  function findAssistantTurns() {
+    const nodes = document.querySelectorAll(
+      '[data-message-author-role="assistant"]',
+    );
+    return Array.from(nodes);
+  }
+
   if (!globalThis.__SkeinCommon) {
     console.warn("[skein] content_common.js not loaded; aborting chatgpt.com script");
     return;
@@ -66,5 +77,6 @@
     findPromptElement,
     findSendButton,
     setPromptText,
+    findAssistantTurns,
   });
 })();
