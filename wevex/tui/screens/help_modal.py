@@ -31,7 +31,7 @@ _HELP_BODY = """[bold]Global[/bold]
 """
 
 _FOOTER = (
-    "Wevex v0.1.0  ·  MIT  ·  https://github.com/Asanali111/wevex"
+    "Wevex v0.2.0  ·  Apache-2.0  ·  https://github.com/Asanali111/wevex"
 )
 
 
